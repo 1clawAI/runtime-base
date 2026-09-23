@@ -2,8 +2,13 @@
 /**
  * Web Search Tool
  *
- * Supports Brave Search, Tavily, SerpAPI (auto-detect from env),
- * or execution intent binding named "web-search".
+ * Supports Brave Search, Tavily, SerpAPI (auto-detect from env), an
+ * execution intent binding named "web-search", or — when none of those are
+ * configured — a platform-default fallback proxied through the vault
+ * (POST /v1/tools/web-search), so every agent gets working search out of
+ * the box. The fallback's own API key never reaches this container; vault
+ * calls Brave server-side and enforces a shared monthly cap across all
+ * orgs (see vault's domain/platform_web_search.rs).
  */
 "use strict";
 
@@ -34,13 +39,10 @@ const definition = {
   },
 };
 
-function isAvailable(env) {
-  return Boolean(
-    env.BRAVE_API_KEY ||
-      env.TAVILY_API_KEY ||
-      env.SERP_API_KEY ||
-      env.ONECLAW_WEB_SEARCH_BINDING
-  );
+function isAvailable() {
+  // Always available: an agent with none of its own providers configured
+  // falls back to the platform-default proxy (see execute() below).
+  return true;
 }
 
 function httpRequest(url, method, headers, body, timeoutMs = 15000) {
@@ -183,6 +185,31 @@ async function searchViaBinding(query, numResults, context) {
   };
 }
 
+async function searchViaPlatformDefault(query, numResults, context) {
+  const baseUrl = context.baseUrl;
+  if (!baseUrl || !context.agentToken) {
+    return { error: "Missing context for the platform default search fallback" };
+  }
+  const resp = await httpRequest(
+    `${baseUrl}/v1/tools/web-search`,
+    "POST",
+    { Authorization: `Bearer ${context.agentToken}` },
+    { query, num_results: numResults }
+  );
+  if (resp.status !== 200) {
+    let message = resp.text.slice(0, 300);
+    try {
+      message = JSON.parse(resp.text)?.error?.message || message;
+    } catch { /* keep raw text */ }
+    return { error: message };
+  }
+  const data = JSON.parse(resp.text);
+  return {
+    results: Array.isArray(data.results) ? data.results : [],
+    provider: data.provider || "platform-default",
+  };
+}
+
 async function execute(_name, args, context) {
   const query = (args.query || "").trim();
   if (!query) return { error: "query is required" };
@@ -203,7 +230,7 @@ async function execute(_name, args, context) {
     if (env.ONECLAW_WEB_SEARCH_BINDING) {
       return await searchViaBinding(query, numResults, context);
     }
-    return { error: "No search provider configured" };
+    return await searchViaPlatformDefault(query, numResults, context);
   } catch (e) {
     return { error: `Web search failed: ${e.message}` };
   }
