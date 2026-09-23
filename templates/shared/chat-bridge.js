@@ -79,6 +79,52 @@ if (_toolDupes.length) {
 }
 const MAX_TOOL_ROUNDS = 10;
 
+// Tool-call arguments can carry secret material (put_secret's `value`, an
+// API key being stored, etc.) — only these keys are ever echoed into a
+// tool_call event or persisted summary; everything else is redacted so a
+// live "what is my agent doing" view can never leak a value into the chat
+// transcript it's meant to make trustworthy, not less safe.
+const SAFE_TOOL_ARG_KEYS = new Set([
+  "path", "prefix", "name", "automation_id", "trigger_type", "description", "query",
+]);
+function redactToolArgs(args) {
+  if (!args || typeof args !== "object") return {};
+  const out = {};
+  for (const [k, v] of Object.entries(args)) {
+    out[k] =
+      SAFE_TOOL_ARG_KEYS.has(k) && ["string", "number", "boolean"].includes(typeof v)
+        ? v
+        : "<hidden>";
+  }
+  return out;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Simulated token-by-token reveal for text that's already fully resolved
+ * (post tool-loop). Real per-token streaming through an *active* tool
+ * round-trip needs provider-specific streaming tool-call delta parsing —
+ * out of scope here; this gets the same felt result (a smooth reveal
+ * instead of one instant block) for the part that's actually cheap to do,
+ * while the tool_call events above already made the wait itself visible. */
+async function streamTextInChunks(res, text, model, chunkId) {
+  const pieces = text.match(/\s*\S+\s*/g) || [text];
+  for (let i = 0; i < pieces.length; i += 3) {
+    const piece = pieces.slice(i, i + 3).join("");
+    const chunk = {
+      id: chunkId,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, delta: { content: piece }, finish_reason: null }],
+    };
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    await sleep(16);
+  }
+}
+
 const PROVIDER_BASE_URLS = {
   openai: "https://api.openai.com",
   anthropic: "https://api.anthropic.com",
@@ -278,11 +324,14 @@ function buildAuthHeaders(provider) {
   return headers;
 }
 
-async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens) {
+async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens, onEvent) {
   if (!TOOLS_AVAILABLE) return null;
 
   const context = buildContext({ agentToken: getAgentToken() });
   let conversationMessages = [...messages];
+  let totalPromptTokens = 0;
+  let totalCompletionTokens = 0;
+  const toolCallsSummary = [];
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const safeMessages = sanitizeMessagesForLlm(conversationMessages);
@@ -327,6 +376,14 @@ async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens)
       return null;
     }
 
+    if (response.usage) {
+      // Each round is a separate billed API call — the provider charges for
+      // every token in every round, so summing (not deduping the resent
+      // context) is what actually matches the dollar cost of this turn.
+      totalPromptTokens += response.usage.prompt_tokens || 0;
+      totalCompletionTokens += response.usage.completion_tokens || 0;
+    }
+
     const choice = response?.choices?.[0];
     if (!choice) return null;
     const msg = choice.message;
@@ -341,6 +398,8 @@ async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens)
       return {
         content: finalizeAssistantContent(msg.content || "", conversationMessages),
         tool_rounds: round,
+        usage: { prompt_tokens: totalPromptTokens, completion_tokens: totalCompletionTokens },
+        tool_calls_summary: toolCallsSummary,
       };
     }
 
@@ -352,7 +411,14 @@ async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens)
           : tc.function.arguments || {};
       } catch { /* empty */ }
 
+      const safeArgs = redactToolArgs(args);
+      onEvent?.({ id: tc.id, name: tc.function?.name, arguments: safeArgs, status: "started", round });
+
       const result = await executeTool(tc.function?.name, args, context, toolModules);
+      const status = result && typeof result === "object" && result.error ? "error" : "completed";
+
+      onEvent?.({ id: tc.id, name: tc.function?.name, status, round });
+      toolCallsSummary.push({ id: tc.id, name: tc.function?.name, arguments: safeArgs, status });
 
       conversationMessages.push({
         role: "tool",
@@ -362,7 +428,12 @@ async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens)
     }
   }
 
-  return { content: "(Tool loop exceeded maximum rounds)", tool_rounds: MAX_TOOL_ROUNDS };
+  return {
+    content: "(Tool loop exceeded maximum rounds)",
+    tool_rounds: MAX_TOOL_ROUNDS,
+    usage: { prompt_tokens: totalPromptTokens, completion_tokens: totalCompletionTokens },
+    tool_calls_summary: toolCallsSummary,
+  };
 }
 
 async function handleChatCompletions(req, res) {
@@ -427,34 +498,62 @@ async function handleChatCompletions(req, res) {
   const useOwnKey = Boolean(body.use_own_key) || !!perRequestLlmApiKey;
   const maxTokens = resolveMaxTokens(body);
 
+  // Declared outside the TOOLS_AVAILABLE block below so the tool-free
+  // passthrough path (further down) can still see whether that block
+  // already committed SSE headers on this response and must not call
+  // res.writeHead a second time.
+  let sseHeadersSent = false;
+
   if (TOOLS_AVAILABLE) {
+    const chatId = `chatcmpl-bridge-${Date.now()}`;
     try {
+      let onEvent;
+      if (stream) {
+        res.writeHead(200, {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "X-1Claw-Chat-Bridge": FRAMEWORK,
+          "X-1Claw-Chat-Mode": "bridge-tools",
+        });
+        sseHeadersSent = true;
+        // Live tool-call visibility: written to the response as each tool
+        // starts/finishes, not buffered until the whole loop resolves — this
+        // is what turns "blank spinner for N seconds" into watching the
+        // agent actually work.
+        onEvent = (ev) => res.write(`data: ${JSON.stringify({ tool_call: ev })}\n\n`);
+      }
+
       const toolResult = await callLlmWithTools(
         messages,
         model,
         provider,
         useOwnKey,
-        maxTokens
+        maxTokens,
+        onEvent
       );
       if (toolResult?.content) {
         if (stream) {
-          res.writeHead(200, {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            Connection: "keep-alive",
-            "X-1Claw-Chat-Bridge": FRAMEWORK,
-            "X-1Claw-Chat-Mode": "bridge-tools",
-          });
-          const chunk = {
-            id: `chatcmpl-bridge-${Date.now()}`,
+          await streamTextInChunks(res, toolResult.content, model, chatId);
+          const usageChunk = {
+            id: chatId,
             object: "chat.completion.chunk",
             created: Math.floor(Date.now() / 1000),
             model,
-            choices: [{ index: 0, delta: { content: toolResult.content }, finish_reason: null }],
+            choices: [],
+            usage: {
+              prompt_tokens: toolResult.usage?.prompt_tokens || 0,
+              completion_tokens: toolResult.usage?.completion_tokens || 0,
+              total_tokens:
+                (toolResult.usage?.prompt_tokens || 0) + (toolResult.usage?.completion_tokens || 0),
+            },
           };
-          res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+          res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
           const done = {
-            ...chunk,
+            id: chatId,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model,
             choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
           };
           res.write(`data: ${JSON.stringify(done)}\n\n`);
@@ -464,7 +563,7 @@ async function handleChatCompletions(req, res) {
         }
 
         return sendJson(res, 200, {
-          id: `chatcmpl-bridge-${Date.now()}`,
+          id: chatId,
           object: "chat.completion",
           created: Math.floor(Date.now() / 1000),
           model,
@@ -473,11 +572,28 @@ async function handleChatCompletions(req, res) {
             message: { role: "assistant", content: toolResult.content },
             finish_reason: "stop",
           }],
-          usage: { tool_rounds: toolResult.tool_rounds },
+          usage: {
+            prompt_tokens: toolResult.usage?.prompt_tokens || 0,
+            completion_tokens: toolResult.usage?.completion_tokens || 0,
+            total_tokens:
+              (toolResult.usage?.prompt_tokens || 0) + (toolResult.usage?.completion_tokens || 0),
+            tool_rounds: toolResult.tool_rounds,
+          },
+          tool_calls_summary: toolResult.tool_calls_summary,
         });
       }
     } catch (e) {
       console.error("[chat-bridge] tool loop error:", e.message);
+      if (sseHeadersSent) {
+        // Headers already committed to SSE — can't fall back to a fresh
+        // JSON error response, so end the stream with a visible error chunk
+        // rather than hanging the client on a connection that will never
+        // otherwise close.
+        res.write(`data: ${JSON.stringify({ error: { message: e.message } })}\n\n`);
+        res.write("data: [DONE]\n\n");
+        res.end();
+        return;
+      }
     }
   }
 
@@ -489,6 +605,12 @@ async function handleChatCompletions(req, res) {
     stream,
     temperature: body.temperature,
     max_tokens: resolveMaxTokens(body),
+    // Asks an OpenAI-compatible endpoint (Shroud's sidecar, or OpenAI
+    // itself) to include real token counts on the final SSE chunk. Only via
+    // Shroud/sidecar — a raw BYOK call straight to a provider's native API
+    // is left exactly as it was, since not every provider recognizes this
+    // field and this path already bypasses Shroud's own request shaping.
+    ...(stream && !useOwnKey ? { stream_options: { include_usage: true } } : {}),
   });
 
   let upstreamResp;
@@ -501,6 +623,12 @@ async function handleChatCompletions(req, res) {
     );
   } catch (e) {
     console.error("[chat-bridge] upstream connect failed:", e.message, "via", upstream.via);
+    if (sseHeadersSent) {
+      res.write(`data: ${JSON.stringify({ error: { message: e.message } })}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+      return;
+    }
     return sendJson(res, 502, {
       error: {
         message: `LLM connection failed: ${e.message}. Enable Shroud on your agent (Dashboard → Agents → Shroud LLM Proxy), or add provider keys under Dashboard → Runtimes → Config → API Keys.`,
@@ -509,14 +637,19 @@ async function handleChatCompletions(req, res) {
   }
 
   if (stream) {
-    res.writeHead(upstreamResp.statusCode || 502, {
-      "Content-Type":
-        upstreamResp.headers["content-type"] || "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      "X-1Claw-Chat-Bridge": FRAMEWORK,
-      "X-1Claw-Chat-Via": upstream.via,
-    });
+    // The tool loop above already opened SSE headers on this response (it
+    // ran, but decided not to invoke any tool this turn) — reuse the same
+    // connection instead of calling writeHead a second time, which throws.
+    if (!sseHeadersSent) {
+      res.writeHead(upstreamResp.statusCode || 502, {
+        "Content-Type":
+          upstreamResp.headers["content-type"] || "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-1Claw-Chat-Bridge": FRAMEWORK,
+        "X-1Claw-Chat-Via": upstream.via,
+      });
+    }
     upstreamResp.pipe(res);
     upstreamResp.on("error", (e) => {
       console.error("[chat-bridge] stream error:", e.message);

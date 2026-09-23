@@ -89,6 +89,48 @@ let agentName = process.env.ONECLAW_AGENT_NAME || null;
 let agentDescription = process.env.ONECLAW_AGENT_DESCRIPTION || null;
 let runtimeName = process.env.ONECLAW_RUNTIME_NAME || null;
 
+// Tool-call arguments can carry secret material (put_secret's `value`, etc.)
+// — only these keys are ever echoed into a tool_call event or persisted
+// summary; everything else is redacted. Mirrors chat-bridge.js.
+const SAFE_TOOL_ARG_KEYS = new Set([
+  "path", "prefix", "name", "automation_id", "trigger_type", "description", "query",
+]);
+function redactToolArgs(args) {
+  if (!args || typeof args !== "object") return {};
+  const out = {};
+  for (const [k, v] of Object.entries(args)) {
+    out[k] =
+      SAFE_TOOL_ARG_KEYS.has(k) && ["string", "number", "boolean"].includes(typeof v)
+        ? v
+        : "<hidden>";
+  }
+  return out;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Simulated token-by-token reveal for text already fully resolved by the
+ * agent loop — see chat-bridge.js's streamTextInChunks for why this is the
+ * pragmatic middle ground rather than real streaming through an active
+ * tool round-trip. */
+async function streamTextInChunks(res, text, model, chunkId) {
+  const pieces = text.match(/\s*\S+\s*/g) || [text];
+  for (let i = 0; i < pieces.length; i += 3) {
+    const piece = pieces.slice(i, i + 3).join("");
+    const chunk = {
+      id: chunkId,
+      object: "chat.completion.chunk",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{ index: 0, delta: { content: piece }, finish_reason: null }],
+    };
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    await sleep(16);
+  }
+}
+
 // ---------- MCP Tool Definitions (subset for agent loop) ----------
 
 const TOOL_DEFINITIONS = [
@@ -435,8 +477,8 @@ async function callLlm(messages, model, provider, useOwnKey, stream, maxTokens, 
     tool_choice: sendTools ? "auto" : undefined,
   });
 
-  const resp = await httpRequest(upstream.url, "POST", buildLlmHeaders(provider), null);
-  // Actually we need raw proxy for this since httpRequest wraps a JSON body
+  // Raw proxy (not httpRequest) so we control the JSON body sent to the LLM
+  // directly, rather than httpRequest's own JSON-wrapping.
   const u = new URL(upstream.url);
   const lib = u.protocol === "https:" ? https : http;
   const opts = {
@@ -483,6 +525,11 @@ async function callLlmStreaming(messages, model, provider, useOwnKey, maxTokens)
     max_tokens: maxTokens,
     tools: TOOLS_ENABLED ? mergeToolDefinitions(ALL_TOOL_DEFINITIONS) : undefined,
     tool_choice: TOOLS_ENABLED ? "auto" : undefined,
+    // Real token counts on the final SSE chunk, via Shroud/sidecar only —
+    // left off for a raw BYOK call straight to a provider's native API.
+    // (This function only runs when TOOLS_ENABLED is false, so the tools
+    // fields above are always undefined here in practice.)
+    ...(!useOwnKey ? { stream_options: { include_usage: true } } : {}),
   });
 
   const u = new URL(upstream.url);
@@ -511,10 +558,13 @@ async function callLlmStreaming(messages, model, provider, useOwnKey, maxTokens)
 
 // ---------- Agent Loop (non-streaming with tool calls) ----------
 
-async function agentLoop(messages, model, provider, useOwnKey, maxTokens) {
+async function agentLoop(messages, model, provider, useOwnKey, maxTokens, onEvent) {
   let conversationMessages = [...messages];
   let rounds = 0;
   let toolsDisabledFallback = false;
+  let totalPromptTokens = 0;
+  let totalCompletionTokens = 0;
+  const toolCallsSummary = [];
 
   while (rounds < MAX_TOOL_ROUNDS) {
     rounds++;
@@ -539,6 +589,14 @@ async function agentLoop(messages, model, provider, useOwnKey, maxTokens) {
       }
       throw e;
     }
+
+    if (response.usage) {
+      // Each round is a separate billed API call — summing (not deduping
+      // the resent context) matches the actual dollar cost of this turn.
+      totalPromptTokens += response.usage.prompt_tokens || 0;
+      totalCompletionTokens += response.usage.completion_tokens || 0;
+    }
+
     const choice = response?.choices?.[0];
     if (!choice) throw new Error("No choices in LLM response");
 
@@ -553,7 +611,13 @@ async function agentLoop(messages, model, provider, useOwnKey, maxTokens) {
       const toolNote = toolsDisabledFallback
         ? "\n\n---\n*Note: Tools were temporarily unavailable for this response due to a provider compatibility issue. Try again, or switch to a different LLM provider in your agent settings if this persists.*"
         : "";
-      return { content: content + toolNote, tool_calls_made: rounds - 1, tools_fallback: toolsDisabledFallback };
+      return {
+        content: content + toolNote,
+        tool_calls_made: rounds - 1,
+        tools_fallback: toolsDisabledFallback,
+        usage: { prompt_tokens: totalPromptTokens, completion_tokens: totalCompletionTokens },
+        tool_calls_summary: toolCallsSummary,
+      };
     }
 
     for (const tc of msg.tool_calls) {
@@ -564,7 +628,15 @@ async function agentLoop(messages, model, provider, useOwnKey, maxTokens) {
           : tc.function.arguments || {};
       } catch { /* keep empty args */ }
 
+      const safeArgs = redactToolArgs(args);
+      onEvent?.({ id: tc.id, name: tc.function?.name, arguments: safeArgs, status: "started", round: rounds });
+
       const result = await executeTool(tc.function.name, args);
+      const status = result && typeof result === "object" && result.error ? "error" : "completed";
+
+      onEvent?.({ id: tc.id, name: tc.function?.name, status, round: rounds });
+      toolCallsSummary.push({ id: tc.id, name: tc.function?.name, arguments: safeArgs, status });
+
       conversationMessages.push({
         role: "tool",
         tool_call_id: tc.id,
@@ -573,7 +645,12 @@ async function agentLoop(messages, model, provider, useOwnKey, maxTokens) {
     }
   }
 
-  return { content: "(Agent loop exceeded maximum tool rounds)", tool_calls_made: rounds };
+  return {
+    content: "(Agent loop exceeded maximum tool rounds)",
+    tool_calls_made: rounds,
+    usage: { prompt_tokens: totalPromptTokens, completion_tokens: totalCompletionTokens },
+    tool_calls_summary: toolCallsSummary,
+  };
 }
 
 function isToolSchemaError(err) {
@@ -711,32 +788,41 @@ async function handleChatCompletions(req, res) {
   const maxTokens = resolveMaxTokens(body);
 
   if (stream && TOOLS_ENABLED) {
-    // For streaming with tools: run agent loop first (non-streaming), then stream final response
-    try {
-      const result = await agentLoop(messages, model, provider, useOwnKey, maxTokens);
-      // Stream the final content as SSE to match expected format
-      res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-        "X-1Claw-Chat-Mode": "native",
-        "X-1Claw-Tool-Rounds": String(result.tool_calls_made),
-      });
+    const chatId = `chatcmpl-native-${Date.now()}`;
+    // Headers open before the agent loop runs (not after) so tool_call
+    // events can be written live as each round executes, instead of the
+    // whole loop resolving silently behind a blank spinner first.
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-1Claw-Chat-Mode": "native",
+    });
+    const onEvent = (ev) => res.write(`data: ${JSON.stringify({ tool_call: ev })}\n\n`);
 
-      // Emit as single chunk (agent loop already resolved tool calls)
-      const chunk = {
-        id: `chatcmpl-native-${Date.now()}`,
+    try {
+      const result = await agentLoop(messages, model, provider, useOwnKey, maxTokens, onEvent);
+
+      await streamTextInChunks(res, result.content, model, chatId);
+
+      const usageChunk = {
+        id: chatId,
         object: "chat.completion.chunk",
         created: Math.floor(Date.now() / 1000),
         model,
-        choices: [{ index: 0, delta: { content: result.content }, finish_reason: null }],
+        choices: [],
+        usage: {
+          prompt_tokens: result.usage?.prompt_tokens || 0,
+          completion_tokens: result.usage?.completion_tokens || 0,
+          total_tokens: (result.usage?.prompt_tokens || 0) + (result.usage?.completion_tokens || 0),
+        },
       };
-      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
 
       const done = {
-        id: chunk.id,
+        id: chatId,
         object: "chat.completion.chunk",
-        created: chunk.created,
+        created: Math.floor(Date.now() / 1000),
         model,
         choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
       };
@@ -745,9 +831,10 @@ async function handleChatCompletions(req, res) {
       res.end();
     } catch (e) {
       console.error("[native-agent] agent loop error:", e.message);
-      if (!res.headersSent) {
-        return sendJson(res, 502, { error: { message: `Agent loop failed: ${e.message}` } });
-      }
+      // Headers are already committed to SSE (200) at this point — end the
+      // stream with a visible error chunk rather than hanging the client.
+      res.write(`data: ${JSON.stringify({ error: { message: `Agent loop failed: ${e.message}` } })}\n\n`);
+      res.write("data: [DONE]\n\n");
       res.end();
     }
     return;
@@ -784,7 +871,13 @@ async function handleChatCompletions(req, res) {
         message: { role: "assistant", content: result.content },
         finish_reason: "stop",
       }],
-      usage: { tool_calls_made: result.tool_calls_made },
+      usage: {
+        prompt_tokens: result.usage?.prompt_tokens || 0,
+        completion_tokens: result.usage?.completion_tokens || 0,
+        total_tokens: (result.usage?.prompt_tokens || 0) + (result.usage?.completion_tokens || 0),
+        tool_calls_made: result.tool_calls_made,
+      },
+      tool_calls_summary: result.tool_calls_summary,
     });
   } catch (e) {
     console.error("[native-agent] error:", e.message);
