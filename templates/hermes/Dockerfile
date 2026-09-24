@@ -62,7 +62,19 @@ ENV PATH="/app/.hermes/bin:/app/.local/bin:${PATH}"
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential python3-dev \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # The base image sets `ENV HOME=/app`, and ENV applies to every user — so
+    # the `npm install -g` steps above, which run as root, create /app/.npm
+    # owned by root. The Hermes installer then runs as appuser, cannot write
+    # that cache, and npm dies with:
+    #     npm error code EACCES
+    #     npm error path /app/.npm/_cacache/tmp/...
+    # It fails in about five seconds and, because the installer runs npm with
+    # --silent and only prints its log when non-empty, prints nothing at all.
+    # That is how this presented as "npm install failed or timed out" with no
+    # cause, and how the image shipped without its agent for weeks.
+    && mkdir -p /app/.npm /app/.local/bin \
+    && chown -R appuser:appuser /app/.npm /app/.local
 
 USER appuser
 RUN if [ "${HERMES_AGENT_INSTALL}" = "1" ]; then \
