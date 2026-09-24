@@ -48,6 +48,22 @@ ENV HERMES_CONFIG_DIR=/app/.hermes
 ENV HERMES_HOME=/app/.hermes
 ENV PATH="/app/.hermes/bin:/app/.local/bin:${PATH}"
 
+# The Hermes installer compiles native Node modules (node-pty), so it needs a
+# C++ toolchain. It tries to `apt install build-essential` itself, which cannot
+# work here — the install runs as appuser, apt needs root — so it printed
+#   "can't install a C++ compiler automatically"
+# and aborted. The `|| echo WARN` below then swallowed that, which is how an
+# agent-less image shipped for weeks. node:24-slim carries no compiler, so
+# install one first, as root.
+#
+# Kept rather than purged afterwards: removing it in a later layer would not
+# shrink the image anyway, and autoremove risks taking runtime libraries the
+# freshly compiled .node files still link against.
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 USER appuser
 RUN if [ "${HERMES_AGENT_INSTALL}" = "1" ]; then \
       curl -fsSL https://hermes-agent.nousresearch.com/install.sh | \
