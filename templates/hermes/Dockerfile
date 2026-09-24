@@ -30,12 +30,49 @@ RUN echo "Installing 1claw-hermes@${ONECLAW_HERMES_REF}" && \
       "$(npm root -g)/@workspace/1claw-hermes/node_modules/@1claw/sdk" && \
     node --input-type=module -e "import('/opt/1claw-hermes/node_modules/@1claw/sdk/dist/index.js').then(m=>{if(typeof m.createClient!=='function')throw new Error('createClient missing');console.log('@1claw/sdk import OK')}).catch(e=>{console.error(e);process.exit(1)})"
 
-# Hermes Agent CLI (hermes gateway, MCP host) — install as appuser under ~/.hermes
+# Hermes Agent CLI (hermes gateway, MCP host) — install as appuser under ~/.hermes.
+#
+# HERMES_HOME and PATH are set BEFORE the install, not after, for two reasons:
+#
+#  1. A non-root install puts the command in $HERMES_HOME/bin (the installer's
+#     UV_TOOL_BIN_DIR), NOT in ~/.local/bin. That directory was never on PATH,
+#     so a perfectly successful install produced a container where
+#     `command -v hermes` failed — hermes-agent-start.sh then logged
+#     "hermes CLI not found", `exec sleep infinity`, and dashboard chat
+#     silently fell through to the native-agent fallback. The runtime looked
+#     healthy and was not running Hermes at all.
+#  2. The installer reads HERMES_HOME to decide where to put things, so it has
+#     to be set at install time rather than only at runtime.
+ENV HOME=/app
+ENV HERMES_CONFIG_DIR=/app/.hermes
+ENV HERMES_HOME=/app/.hermes
+ENV PATH="/app/.hermes/bin:/app/.local/bin:${PATH}"
+
 USER appuser
 RUN if [ "${HERMES_AGENT_INSTALL}" = "1" ]; then \
       curl -fsSL https://hermes-agent.nousresearch.com/install.sh | \
         bash -s -- --skip-browser || \
       echo "WARN: Hermes Agent install failed — rebuild or install via Terminal"; \
+    fi
+
+# Fail the build rather than ship an image whose agent is missing.
+#
+# This is the same rule commit 7b77c154 ("stop images shipping without their
+# agent") applied to the npm-installed templates — it used `npm ls -g`, which
+# by construction could not cover Hermes, because Hermes installs via
+# `curl | bash` into a Python venv. So Hermes kept the old
+# install-or-shrug behaviour and kept shipping without its agent.
+# Verify the command, not the install command's exit status.
+RUN if [ "${HERMES_AGENT_INSTALL}" = "1" ]; then \
+      command -v hermes >/dev/null 2>&1 || { \
+        echo "FATAL: hermes CLI is not on PATH after install."; \
+        echo "  Looked on: ${PATH}"; \
+        echo "  Expected:  ${HERMES_HOME}/bin/hermes"; \
+        ls -la "${HERMES_HOME}/bin" 2>/dev/null || echo "  (${HERMES_HOME}/bin does not exist)"; \
+        echo "  Build with --build-arg HERMES_AGENT_INSTALL=0 to ship a Hermes-less image deliberately."; \
+        exit 1; \
+      }; \
+      echo "hermes CLI verified at $(command -v hermes)"; \
     fi
 USER root
 
@@ -53,10 +90,8 @@ RUN cd /app/workspace && \
 
 USER appuser
 
-ENV HOME=/app
-ENV HERMES_CONFIG_DIR=/app/.hermes
-ENV HERMES_HOME=/app/.hermes
-ENV PATH="/app/.local/bin:${PATH}"
+# HOME / HERMES_CONFIG_DIR / HERMES_HOME / PATH are set above, before the
+# install, so the installer and the running container agree on the layout.
 
 WORKDIR /app/workspace
 

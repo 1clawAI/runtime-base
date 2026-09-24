@@ -8,6 +8,16 @@ export HERMES_CONFIG_DIR="${HERMES_CONFIG_DIR:-${HOME}/.hermes}"
 export HERMES_HOME="${HERMES_HOME:-${HOME}/.hermes}"
 mkdir -p "$HERMES_CONFIG_DIR"
 
+# A non-root Hermes install puts the command in $HERMES_HOME/bin, which older
+# images never added to PATH — so `command -v hermes` failed below, this script
+# slept forever, and chat quietly used the native-agent fallback instead of
+# Hermes. The Dockerfile now sets this too; keep it here so an image built
+# before that fix still finds a Hermes that is actually installed.
+case ":${PATH}:" in
+  *":${HERMES_HOME}/bin:"*) ;;
+  *) PATH="${HERMES_HOME}/bin:${PATH}"; export PATH ;;
+esac
+
 echo "hermes-agent-start: applying 1claw-hermes runtime integration..." >&2
 
 if command -v 1claw-hermes-runtime-start >/dev/null 2>&1; then
