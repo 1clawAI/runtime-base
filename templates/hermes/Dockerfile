@@ -83,8 +83,19 @@ RUN if [ "${HERMES_AGENT_INSTALL}" = "1" ]; then \
       command -v hermes >/dev/null 2>&1 || { \
         echo "FATAL: hermes CLI is not on PATH after install."; \
         echo "  Looked on: ${PATH}"; \
-        echo "  Expected:  ${HERMES_HOME}/bin/hermes"; \
+        echo "  Launcher expected at: ${HOME}/.local/bin/hermes"; \
+        ls -la "${HOME}/.local/bin" 2>/dev/null || echo "  (${HOME}/.local/bin does not exist)"; \
         ls -la "${HERMES_HOME}/bin" 2>/dev/null || echo "  (${HERMES_HOME}/bin does not exist)"; \
+        echo "--- reproducing the installer's Node step with output visible ---"; \
+        echo "    (it runs `npm install --silent` and discards the log when empty,"; \
+        echo "     so the only way to see the real error is to run it ourselves)"; \
+        if [ -d "${HERMES_HOME}/hermes-agent" ]; then \
+          cd "${HERMES_HOME}/hermes-agent" && \
+          (npm install --workspaces=false 2>&1 | tail -40) || true; \
+        else \
+          echo "    (${HERMES_HOME}/hermes-agent does not exist — install died earlier)"; \
+        fi; \
+        echo "--- end Node step diagnostics ---"; \
         echo "  Build with --build-arg HERMES_AGENT_INSTALL=0 to ship a Hermes-less image deliberately."; \
         exit 1; \
       }; \
