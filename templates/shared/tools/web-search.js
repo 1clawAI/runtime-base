@@ -145,6 +145,20 @@ async function searchSerp(query, numResults, apiKey) {
   return { results, provider: "serpapi" };
 }
 
+// Vault call headers for a runtime-injected agent JWT. Runtime tokens carry a
+// `runtime_id` claim and Vault's auth middleware rejects them (401
+// "Runtime-bound token requires matching X-1Claw-Runtime-Id header") unless the
+// X-1Claw-Runtime-Id header is present — the same header agent-token.js's
+// apiAuthHeaders() sends for the built-in tools. Omitting it is what surfaced to
+// chat as "unable to perform web searches ... due to authorization restrictions".
+function vaultAuthHeaders(context) {
+  const env = context.env || process.env;
+  const headers = { Authorization: `Bearer ${context.agentToken}` };
+  const runtimeId = env.ONECLAW_RUNTIME_ID;
+  if (runtimeId) headers["X-1Claw-Runtime-Id"] = runtimeId;
+  return headers;
+}
+
 async function searchViaBinding(query, numResults, context) {
   const baseUrl = context.baseUrl;
   const agentId = context.agentId;
@@ -156,7 +170,7 @@ async function searchViaBinding(query, numResults, context) {
   const resp = await httpRequest(
     url,
     "POST",
-    { Authorization: `Bearer ${context.agentToken}` },
+    vaultAuthHeaders(context),
     {
       binding: "web-search",
       intent_type: "http",
@@ -207,7 +221,7 @@ async function searchViaPlatformDefault(query, numResults, context) {
   const resp = await httpRequest(
     `${baseUrl}/v1/tools/web-search`,
     "POST",
-    { Authorization: `Bearer ${context.agentToken}` },
+    vaultAuthHeaders(context),
     { query, num_results: numResults }
   );
   if (resp.status !== 200) {
