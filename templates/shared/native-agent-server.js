@@ -69,7 +69,11 @@ const FRAMEWORK = process.env.ONECLAW_FRAMEWORK || "hermes";
 const AGENT_ID = process.env.ONECLAW_AGENT_ID || "";
 const RUNTIME_ID = process.env.ONECLAW_RUNTIME_ID || "";
 const VAULT_ID = process.env.ONECLAW_VAULT_ID || "";
-const BASE_URL = process.env.ONECLAW_BASE_URL || process.env.ONECLAW_API_URL || "https://api.1claw.co";
+const BASE_URL =
+  process.env.ONECLAW_VAULT_INTERNAL_URL ||
+  process.env.ONECLAW_BASE_URL ||
+  process.env.ONECLAW_API_URL ||
+  "https://api.1claw.co";
 const MCP_URL = process.env.ONECLAW_MCP_URL || "https://mcp.1claw.co/mcp";
 const TOOLS_ENABLED = process.env.NATIVE_AGENT_TOOLS !== "0";
 const MEMORY_ENABLED = process.env.NATIVE_AGENT_MEMORY !== "0";

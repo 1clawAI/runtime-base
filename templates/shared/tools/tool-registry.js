@@ -58,6 +58,7 @@ function buildContext(overrides = {}) {
     vaultId: process.env.ONECLAW_VAULT_ID || "",
     agentId: process.env.ONECLAW_AGENT_ID || "",
     baseUrl:
+      process.env.ONECLAW_VAULT_INTERNAL_URL ||
       process.env.ONECLAW_BASE_URL ||
       process.env.ONECLAW_API_URL ||
       "https://api.1claw.co",

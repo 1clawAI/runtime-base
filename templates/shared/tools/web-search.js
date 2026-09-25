@@ -185,10 +185,24 @@ async function searchViaBinding(query, numResults, context) {
   };
 }
 
+function resolveVaultBase(context) {
+  const env = context.env || process.env;
+  const raw =
+    env.ONECLAW_VAULT_INTERNAL_URL ||
+    context.baseUrl ||
+    env.ONECLAW_BASE_URL ||
+    env.ONECLAW_API_URL ||
+    "";
+  return String(raw).replace(/\/$/, "");
+}
+
 async function searchViaPlatformDefault(query, numResults, context) {
-  const baseUrl = context.baseUrl;
+  const baseUrl = resolveVaultBase(context);
   if (!baseUrl || !context.agentToken) {
-    return { error: "Missing context for the platform default search fallback" };
+    return {
+      error:
+        "Missing context for the platform default search fallback (need an agent JWT and ONECLAW_BASE_URL / ONECLAW_VAULT_INTERNAL_URL). Stop then Start the runtime.",
+    };
   }
   const resp = await httpRequest(
     `${baseUrl}/v1/tools/web-search`,
@@ -199,8 +213,16 @@ async function searchViaPlatformDefault(query, numResults, context) {
   if (resp.status !== 200) {
     let message = resp.text.slice(0, 300);
     try {
-      message = JSON.parse(resp.text)?.error?.message || message;
+      const parsed = JSON.parse(resp.text);
+      message = parsed?.error?.message || parsed?.detail || message;
     } catch { /* keep raw text */ }
+    if (resp.status === 401 || resp.status === 403) {
+      return {
+        error:
+          `Web search was refused (${resp.status}): ${message}. ` +
+          "The fallback requires the agent's own JWT. Stop then Start the runtime so Vault injects a fresh token.",
+      };
+    }
     return { error: message };
   }
   const data = JSON.parse(resp.text);
