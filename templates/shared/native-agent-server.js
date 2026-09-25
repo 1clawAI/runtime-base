@@ -36,6 +36,9 @@
 
 const http = require("http");
 const https = require("https");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { URL } = require("url");
 const {
   acceptRefreshedAgentToken,
@@ -92,6 +95,177 @@ let perRequestLlmApiKey = null;
 let agentName = process.env.ONECLAW_AGENT_NAME || null;
 let agentDescription = process.env.ONECLAW_AGENT_DESCRIPTION || null;
 let runtimeName = process.env.ONECLAW_RUNTIME_NAME || null;
+
+// ---------- Proxy-to-native chat backend ----------
+//
+// Some frameworks ship their own OpenAI-compatible `/v1/chat/completions`
+// (OpenClaw's `openclaw gateway`, and — later — Hermes). When one is present
+// and healthy we can proxy the dashboard chat straight to it ("native" mode)
+// instead of running this server's own agent loop ("bridge" mode). The bridge
+// is always the safety net: a not-yet-rebuilt image, a disabled gateway, or an
+// unreachable/erroring native endpoint all transparently fall back to it.
+//
+// New native frameworks are added by extending `nativeBackendConfig` — no other
+// change to this file. Hermes is wired purely by env (ONECLAW_HERMES_NATIVE_URL)
+// so a sibling adapter can enable it without touching the bridge.
+const HOME_DIR = process.env.HOME || os.homedir();
+
+function defaultOpenclawTokenFile() {
+  const dir = process.env.OPENCLAW_CONFIG_DIR || path.join(HOME_DIR, ".openclaw");
+  return path.join(dir, "gateway-loopback-token");
+}
+
+// Loopback auth token for the OpenClaw gateway. Prefer an explicit env var;
+// otherwise read the file openclaw-runtime-setup.js persists (the two processes
+// don't share an env, so the file is the handoff). Empty is fine — a gateway
+// started with `--allow-unconfigured --bind loopback` may not require one.
+function resolveOpenclawToken() {
+  const envTok = process.env.ONECLAW_OPENCLAW_NATIVE_TOKEN;
+  if (envTok && envTok.trim()) return envTok.trim();
+  const file = process.env.ONECLAW_OPENCLAW_TOKEN_FILE || defaultOpenclawTokenFile();
+  try {
+    const t = fs.readFileSync(file, "utf8").trim();
+    if (t) return t;
+  } catch { /* no token file yet */ }
+  return "";
+}
+
+// Returns a native backend descriptor for the given template, or null when the
+// template has no native gateway configured (→ serve via the bridge).
+function nativeBackendConfig(template) {
+  const t = String(template || FRAMEWORK || "").toLowerCase();
+  if (t === "openclaw") {
+    return {
+      name: "openclaw",
+      url: process.env.ONECLAW_OPENCLAW_NATIVE_URL || "http://127.0.0.1:18789/v1/chat/completions",
+      token: resolveOpenclawToken(),
+    };
+  }
+  // Hermes has no in-bridge native gateway yet — a sibling adapter enables it by
+  // setting ONECLAW_HERMES_NATIVE_URL (and, if it needs auth, *_TOKEN).
+  if (t === "hermes" && process.env.ONECLAW_HERMES_NATIVE_URL) {
+    return {
+      name: "hermes",
+      url: process.env.ONECLAW_HERMES_NATIVE_URL,
+      token: (process.env.ONECLAW_HERMES_NATIVE_TOKEN || "").trim(),
+    };
+  }
+  return null;
+}
+
+// Priority order: (a) explicit per-turn `body.backend` override, (b) the
+// template's native default, (c) bridge. `template` falls back to FRAMEWORK.
+function resolveChatBackend(body) {
+  const override = typeof body?.backend === "string" ? body.backend.trim().toLowerCase() : "";
+  const native = nativeBackendConfig(body?.template);
+
+  if (override === "bridge") return { kind: "bridge", reason: "override" };
+  if (override === "native") {
+    return native
+      ? { kind: "native", config: native, reason: "override" }
+      : { kind: "bridge", reason: "override_no_native" };
+  }
+  // No override — template-derived default.
+  if (native) return { kind: "native", config: native, reason: "template_default" };
+  return { kind: "bridge", reason: "default" };
+}
+
+// Cheap reachability probe: any HTTP status back (even 4xx/405 from a GET on a
+// POST-only route) means the port is listening; a connect error/timeout means
+// it isn't. Kept short so it never stalls a chat turn or a /health poll.
+function probeUrlReachable(targetUrl, token, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    let u;
+    try { u = new URL(targetUrl); } catch { return resolve(false); }
+    const lib = u.protocol === "https:" ? https : http;
+    const opts = {
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === "https:" ? 443 : 80),
+      path: u.pathname + u.search,
+      method: "GET",
+      timeout: timeoutMs,
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    };
+    const req = lib.request(opts, (resp) => { resp.resume(); resolve(true); });
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.end();
+  });
+}
+
+// Proxy a chat request to a native gateway. OpenClaw is already OpenAI-shaped —
+// we forward the body verbatim (minus 1Claw-only routing/context keys the
+// gateway doesn't understand) and stream the SSE through unchanged.
+//
+// Returns { served: true } once a 2xx response has been (or is being) relayed.
+// Returns { served: false } — leaving the response untouched so the caller can
+// fall back to the bridge — when the gateway is unreachable or answers non-2xx
+// (e.g. a disabled endpoint 404 or an auth 401), provided nothing was written.
+const NATIVE_PASSTHROUGH_STRIP_KEYS = new Set([
+  "backend", "template", "agent_name", "agent_description", "runtime_name",
+  "memory_enabled", "memory_context", "use_own_key", "system_prompt_override",
+  "provider",
+]);
+
+function buildNativePayload(body) {
+  const out = {};
+  for (const [k, v] of Object.entries(body || {})) {
+    if (NATIVE_PASSTHROUGH_STRIP_KEYS.has(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function proxyToNative(config, body, res, wantStream) {
+  const payload = JSON.stringify(buildNativePayload(body));
+  let u;
+  try { u = new URL(config.url); } catch { return Promise.resolve({ served: false }); }
+  const lib = u.protocol === "https:" ? https : http;
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: wantStream ? "text/event-stream" : "application/json",
+    "Content-Length": Buffer.byteLength(payload),
+  };
+  if (config.token) headers.Authorization = `Bearer ${config.token}`;
+  const opts = {
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === "https:" ? 443 : 80),
+    path: u.pathname + u.search,
+    method: "POST",
+    headers,
+    timeout: 300000,
+  };
+
+  return new Promise((resolve) => {
+    const req = lib.request(opts, (upstream) => {
+      const status = upstream.statusCode || 502;
+      // Non-2xx before we've committed anything → fall back to the bridge.
+      if (status < 200 || status >= 300) {
+        upstream.resume();
+        resolve({ served: false, status });
+        return;
+      }
+      const ct = upstream.headers["content-type"] ||
+        (wantStream ? "text/event-stream" : "application/json");
+      res.writeHead(status, {
+        "Content-Type": ct,
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-1Claw-Chat-Mode": "native",
+        "X-1Claw-Native-Backend": config.name,
+      });
+      upstream.pipe(res);
+      upstream.on("end", () => resolve({ served: true }));
+      upstream.on("error", () => { try { res.end(); } catch { /* noop */ } resolve({ served: true }); });
+    });
+    req.on("error", () => resolve({ served: false }));
+    req.on("timeout", () => { req.destroy(); resolve({ served: false }); });
+    req.write(payload);
+    req.end();
+  });
+}
 
 // Tool-call arguments can carry secret material (put_secret's `value`, etc.)
 // — only these keys are ever echoed into a tool_call event or persisted
@@ -759,6 +933,27 @@ async function handleChatCompletions(req, res) {
   perRequestLlmApiKey = (llmApiKey && typeof llmApiKey === "string" && llmApiKey.length > 0)
     ? llmApiKey : null;
 
+  // Proxy-to-native routing. When the resolved backend is a framework's own
+  // OpenAI-compatible gateway AND it's reachable, stream straight through to it
+  // ("native"). Any failure — unreachable, disabled endpoint, non-2xx — falls
+  // back to the bridge path below with nothing written to `res`.
+  const backend = resolveChatBackend(body);
+  if (backend.kind === "native" && backend.config) {
+    const reachable = await probeUrlReachable(backend.config.url, backend.config.token);
+    if (reachable) {
+      const outcome = await proxyToNative(backend.config, body, res, Boolean(body.stream));
+      if (outcome.served) return;
+      console.warn(
+        `[native-agent] native backend '${backend.config.name}' returned ${outcome.status || "unreachable"} — falling back to bridge`
+      );
+    } else {
+      console.warn(
+        `[native-agent] native backend '${backend.config.name}' unreachable at ${backend.config.url} — falling back to bridge`
+      );
+    }
+    // fall through to bridge (nothing written to res yet)
+  }
+
   // Agent identity
   if (body.agent_name) agentName = body.agent_name;
   if (body.agent_description) agentDescription = body.agent_description;
@@ -800,7 +995,9 @@ async function handleChatCompletions(req, res) {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
-      "X-1Claw-Chat-Mode": "native",
+      // The 1Claw bridge (this server's own tool-enabled agent loop) served the
+      // turn — "native" is reserved for a proxy to a framework's own gateway.
+      "X-1Claw-Chat-Mode": "bridge",
     });
     const onEvent = (ev) => res.write(`data: ${JSON.stringify({ tool_call: ev })}\n\n`);
 
@@ -852,7 +1049,7 @@ async function handleChatCompletions(req, res) {
         "Content-Type": upstreamResp.headers["content-type"] || "text/event-stream",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
-        "X-1Claw-Chat-Mode": "native",
+        "X-1Claw-Chat-Mode": "bridge",
       });
       upstreamResp.pipe(res);
       upstreamResp.on("error", () => res.end());
@@ -896,11 +1093,25 @@ const server = http.createServer(async (req, res) => {
   const method = req.method || "GET";
 
   if (method === "GET" && (url === "/health" || url === "/healthz")) {
+    // Advertise which native gateways (if any) are reachable so operators can
+    // see whether this runtime will proxy chat to a framework's own agent
+    // ("native") or serve it via this bridge ("bridge"). Probe is short so a
+    // /health poll never stalls.
+    const fwNative = nativeBackendConfig(FRAMEWORK);
+    const nativeBackends = {};
+    if (fwNative) {
+      nativeBackends[fwNative.name] = await probeUrlReachable(fwNative.url, fwNative.token, 700);
+    }
+    const defaultBackend = fwNative && nativeBackends[fwNative.name] ? "native" : "bridge";
     return sendJson(res, 200, {
       status: "ok",
       framework: FRAMEWORK,
       chat: true,
-      mode: "native",
+      // Truthful default for this runtime given current reachability; a per-turn
+      // `backend` override can still force the other path.
+      mode: defaultBackend,
+      default_chat_backend: defaultBackend,
+      native_backends: nativeBackends,
       tools_enabled: TOOLS_ENABLED,
       memory_enabled: MEMORY_ENABLED,
       agent_id: AGENT_ID || null,

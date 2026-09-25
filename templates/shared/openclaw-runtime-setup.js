@@ -5,6 +5,7 @@
  */
 "use strict";
 
+const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -12,6 +13,27 @@ const path = require("path");
 const home = process.env.HOME || os.homedir();
 const openclawDir = process.env.OPENCLAW_CONFIG_DIR || path.join(home, ".openclaw");
 const configPath = path.join(openclawDir, "openclaw.json");
+
+// Loopback auth token for the gateway's OpenAI-compatible HTTP endpoint. It's
+// shared with the in-container 1Claw bridge (native-agent-server.js) via a file
+// on disk — the two processes don't share an env. Persist once and reuse across
+// restarts so the token is stable for the lifetime of the container filesystem.
+// ONECLAW_OPENCLAW_TOKEN_FILE overrides the path (must match the bridge's).
+const tokenFile =
+  process.env.ONECLAW_OPENCLAW_TOKEN_FILE || path.join(openclawDir, "gateway-loopback-token");
+
+fs.mkdirSync(openclawDir, { recursive: true });
+
+let loopbackToken = "";
+try {
+  loopbackToken = fs.readFileSync(tokenFile, "utf8").trim();
+} catch { /* not provisioned yet */ }
+if (!loopbackToken) {
+  loopbackToken = crypto.randomBytes(32).toString("hex");
+  fs.writeFileSync(tokenFile, loopbackToken + "\n", { mode: 0o600 });
+}
+// Tighten perms even if the file pre-existed with a looser mode.
+try { fs.chmodSync(tokenFile, 0o600); } catch { /* best effort */ }
 
 const shroudEnabled =
   process.env.ONECLAW_SHROUD_ENABLED === "1" ||
@@ -55,12 +77,31 @@ if (fs.existsSync(configPath)) {
   }
 }
 
+const existingGateway = existing.gateway || {};
+const existingHttp = existingGateway.http || {};
+const existingEndpoints = existingHttp.endpoints || {};
+
 const merged = {
   ...existing,
   gateway: {
     mode: "local",
     bind: "loopback",
-    ...(existing.gateway || {}),
+    ...existingGateway,
+    // Enable the OpenAI-compatible HTTP endpoint so the 1Claw bridge can proxy
+    // dashboard chat straight to the native OpenClaw agent loop. Loopback-only
+    // (bind stays "loopback"); the token gates the in-container bridge call.
+    http: {
+      ...existingHttp,
+      enabled: true,
+      authToken: loopbackToken,
+      endpoints: {
+        ...existingEndpoints,
+        chatCompletions: {
+          ...(existingEndpoints.chatCompletions || {}),
+          enabled: true,
+        },
+      },
+    },
   },
   plugins: {
     ...(existing.plugins || {}),
@@ -77,6 +118,8 @@ const merged = {
   },
 };
 
-fs.mkdirSync(openclawDir, { recursive: true });
 fs.writeFileSync(configPath, JSON.stringify(merged, null, 2) + "\n");
-console.error(`[openclaw-runtime] Wrote ${configPath} with @1claw/openclaw-plugin enabled`);
+console.error(
+  `[openclaw-runtime] Wrote ${configPath} with @1claw/openclaw-plugin enabled ` +
+  `(loopback OpenAI chatCompletions endpoint on; token at ${tokenFile})`
+);
