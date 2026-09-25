@@ -149,15 +149,15 @@ const definition = {
   },
 };
 
-function isAvailable(env) {
-  const shroud =
-    env.ONECLAW_SHROUD_ENABLED === "1" || env.ONECLAW_SHROUD_ENABLED === "true";
-  return (
-    shroud ||
-    Boolean(env.OPENAI_API_KEY) ||
-    Boolean(env.ONECLAW_OPENAI_KEY_PATH) ||
-    Boolean(env.ONECLAW_VAULT_ID)
-  );
+function isAvailable() {
+  // Always available on every tier — like Web Search. Image generation does
+  // NOT require the Business+ Shroud LLM *chat* proxy (ONECLAW_SHROUD_ENABLED):
+  // when no BYOK key and no shroud routing are configured, resolveImageUpstream
+  // falls back to Shroud's public `/v1/images/generations`, which is served by
+  // the platform OpenAI key and is not billed through the Stripe LLM gateway.
+  // A BYOK key or shroud routing just changes *how* it generates, not *whether*
+  // it can. Auth/quota failures surface as a graceful error, not an outage.
+  return true;
 }
 
 function resolveImageUpstream(env, context) {
