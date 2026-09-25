@@ -146,13 +146,14 @@ COPY shared/message-sanitize.js /app/message-sanitize.js
 COPY shared/fix-esm-imports.mjs /app/fix-esm-imports.mjs
 COPY shared/user-port.sh /app/user-port.sh
 COPY shared/hermes-agent-start.sh /app/hermes-agent-start.sh
+COPY shared/hermes-native-setup.js /app/hermes-native-setup.js
 COPY shared/tools/ /app/tools/
 COPY hermes/tools-config.js /app/tools-config.js
 USER root
 ENV ENABLE_CODE_EXEC=true
 RUN chmod +x /app/template-entrypoint.sh /app/user-port.sh /app/hermes-agent-start.sh \
     && chown appuser:appuser /app/chat-bridge.js /app/1claw-capabilities-prompt.js /app/agent-token.js /app/native-agent-server.js /app/image-gen.js /app/image-gen-request.js /app/generated-image-cache.js /app/message-sanitize.js \
-       /app/user-port.sh /app/hermes-agent-start.sh /app/tools/ /app/tools-config.js
+       /app/user-port.sh /app/hermes-agent-start.sh /app/hermes-native-setup.js /app/tools/ /app/tools-config.js
 USER appuser
 
 CMD ["/app/template-entrypoint.sh"]

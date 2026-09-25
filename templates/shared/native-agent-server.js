@@ -130,6 +130,44 @@ function resolveOpenclawToken() {
   return "";
 }
 
+function defaultHermesTokenFile() {
+  const dir =
+    process.env.HERMES_CONFIG_DIR ||
+    process.env.HERMES_HOME ||
+    path.join(HOME_DIR, ".hermes");
+  return path.join(dir, "native-loopback-token");
+}
+
+// Loopback auth token for the in-container Hermes adapter (1claw-hermes's
+// OpenAI-compatible SSE adapter on :8778). Same handoff shape as OpenClaw:
+// prefer an explicit env var, otherwise read the 0600 file the hermes start
+// script provisions (the adapter and this bridge run in separate processes and
+// don't share an env). Empty is fine — the adapter treats an unset token as
+// "auth disabled".
+function resolveHermesToken() {
+  const envTok = process.env.ONECLAW_HERMES_NATIVE_TOKEN;
+  if (envTok && envTok.trim()) return envTok.trim();
+  const file = process.env.ONECLAW_HERMES_TOKEN_FILE || defaultHermesTokenFile();
+  try {
+    const t = fs.readFileSync(file, "utf8").trim();
+    if (t) return t;
+  } catch { /* no token file yet */ }
+  return "";
+}
+
+// Normalise a native gateway base URL to its OpenAI chat-completions endpoint.
+// The 1claw-hermes adapter listens on `POST /v1/chat/completions`, but its
+// documented wiring env is the OpenAI-style base `.../v1` — accept either (and
+// a bare host) so the value the start script exports and the value proxied
+// against never drift. Mirrors resolveLlmUpstream's OPENAI_BASE_URL handling.
+function toChatCompletionsUrl(base) {
+  const b = String(base || "").trim().replace(/\/+$/, "");
+  if (!b) return b;
+  if (/\/chat\/completions$/.test(b)) return b;
+  if (/\/v1$/.test(b)) return `${b}/chat/completions`;
+  return `${b}/v1/chat/completions`;
+}
+
 // Returns a native backend descriptor for the given template, or null when the
 // template has no native gateway configured (→ serve via the bridge).
 function nativeBackendConfig(template) {
@@ -141,13 +179,21 @@ function nativeBackendConfig(template) {
       token: resolveOpenclawToken(),
     };
   }
-  // Hermes has no in-bridge native gateway yet — a sibling adapter enables it by
-  // setting ONECLAW_HERMES_NATIVE_URL (and, if it needs auth, *_TOKEN).
-  if (t === "hermes" && process.env.ONECLAW_HERMES_NATIVE_URL) {
+  // Hermes ships the 1claw-hermes OpenAI-compatible adapter on loopback :8778
+  // (launched by hermes-agent-start.sh alongside `hermes gateway`). Native is the
+  // default, exactly like OpenClaw — the reachability probe in
+  // handleChatCompletions/health is what makes this safe: an image built before
+  // the adapter shipped (or an adapter that failed to start) simply fails the
+  // probe and transparently falls back to the bridge. ONECLAW_HERMES_NATIVE_URL
+  // overrides the endpoint; the token comes from env or the start script's 0600
+  // token file (resolveHermesToken).
+  if (t === "hermes") {
     return {
       name: "hermes",
-      url: process.env.ONECLAW_HERMES_NATIVE_URL,
-      token: (process.env.ONECLAW_HERMES_NATIVE_TOKEN || "").trim(),
+      url: toChatCompletionsUrl(
+        process.env.ONECLAW_HERMES_NATIVE_URL || "http://127.0.0.1:8778/v1/chat/completions"
+      ),
+      token: resolveHermesToken(),
     };
   }
   return null;

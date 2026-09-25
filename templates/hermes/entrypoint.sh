@@ -10,6 +10,15 @@ PUBLIC_PORT="${PORT:-8080}"
 export ONECLAW_FRAMEWORK="${ONECLAW_FRAMEWORK:-hermes}"
 export USER_PORT
 
+# Native chat: the 1Claw bridge (native-agent-server.js, started on USER_PORT
+# below) proxies dashboard chat to the in-container 1claw-hermes adapter on
+# loopback :8778 when it's reachable, and transparently falls back to its own
+# tool-enabled agent loop when it isn't. Point the bridge at the adapter's
+# OpenAI base here (the adapter itself is launched by hermes-agent-start.sh).
+# The adapter's bearer token is shared via a 0600 file the start script writes;
+# the bridge reads it (resolveHermesToken) — no token on the env is required.
+export ONECLAW_HERMES_NATIVE_URL="${ONECLAW_HERMES_NATIVE_URL:-http://127.0.0.1:8778/v1}"
+
 # Vault injects ONECLAW_AGENT_TOKEN at start — wire CLI/SDK without interactive login.
 if [ -z "${ONECLAW_TOKEN:-}" ] && [ -n "${ONECLAW_AGENT_TOKEN:-}" ]; then
   export ONECLAW_TOKEN="$ONECLAW_AGENT_TOKEN"
