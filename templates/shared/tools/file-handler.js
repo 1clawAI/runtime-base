@@ -42,8 +42,11 @@ const readUrlDef = {
   function: {
     name: "read_url",
     description:
-      "Fetch a URL and extract its text content. " +
-      "Useful for reading web pages, API responses, or documents.",
+      "Fetch a public URL and extract its text content. Use it to actually " +
+      "read a web page, article, documentation, or API response — for example " +
+      "to follow up on a web_search result and pull concrete details (facts, " +
+      "contact info, specs, pricing) from the page itself. Returns the " +
+      "extracted text.",
     parameters: {
       type: "object",
       properties: {

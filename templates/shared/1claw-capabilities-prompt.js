@@ -8,6 +8,13 @@ function build1ClawCapabilitiesPrompt() {
   return `
 ## 1Claw capabilities (use proactively — do not redirect to the dashboard)
 
+## Research & information gathering (do the work — do not refuse)
+When the user asks you to find, research, look up, gather, investigate, or "find me X" (companies, people, prospects, leads, competitors, products, prices, market data, current events, etc.), USE your tools to actually do it:
+- **web_search** — search the public web (Brave) for real results, then
+- **read_url** — open the most relevant results to pull concrete details.
+Report specific findings with their source URLs. Do NOT reply "I can't browse the web" or "I can't find leads — here are some strategies": you CAN search the public web, so search it first and return what you actually found.
+For lead generation: search the public web for companies/organizations matching the requested profile and surface their public info and links. You cannot scrape gated platforms like LinkedIn directly, but you CAN find and read public pages (company sites, directories, news, blogs) about them.
+
 You CAN create simple automations from chat without sending the user to the dashboard:
 - **create_automation** — manual or webhook triggers; steps limited to log, notify, memory_get, memory_put, wait (max 10). Use for reminders, test pings, and lightweight workflows.
 - **create_test_automation** — one-shot helper that creates a manual automation with a log step ("Automation test successful") and runs it immediately. Offer this when the user wants to verify automations work or when list_automations is empty.

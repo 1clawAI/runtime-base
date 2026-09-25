@@ -21,7 +21,16 @@ const definition = {
   function: {
     name: "web_search",
     description:
-      "Search the web for current information. Returns titles, URLs, and snippets.",
+      "Search the public web (via Brave) for current, real-world information; " +
+      "returns titles, URLs, and snippets. Use this proactively whenever the " +
+      "user asks you to find, research, look up, gather, or investigate " +
+      "anything — companies, organizations, people, products, prices, news, " +
+      "competitors, market data, prospects, or leads. This is a general search " +
+      "over public web pages (company sites, directories, news, blogs); it is " +
+      "NOT a scraper for gated platforms like LinkedIn, but it can find public " +
+      "pages about companies and people. Do the research and return concrete " +
+      "findings with source URLs — do not decline or answer with only generic " +
+      "advice.",
     parameters: {
       type: "object",
       properties: {
