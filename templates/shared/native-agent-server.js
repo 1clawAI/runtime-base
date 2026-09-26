@@ -247,6 +247,35 @@ function probeUrlReachable(targetUrl, token, timeoutMs = 1200) {
 }
 
 /**
+ * What happened the last time a turn was routed at the native gateway.
+ *
+ * /health could only report reachability, and a gateway that answers 401 is
+ * perfectly reachable — so health said "native" while every turn in fact fell
+ * back to the bridge. Same bug as the silent fallback itself, one route over:
+ * the chat path learned to tell the truth and the health path did not.
+ */
+let lastNativeOutcome = null;
+
+/** Reasons a retry will not help — health should stop claiming "native". */
+const STICKY_NATIVE_FAILURES = new Set(["auth", "not_enabled"]);
+
+/**
+ * Probe the gateway, and give a starting one a second chance.
+ *
+ * "Unreachable" is overwhelmingly a gateway that is not up *yet* — the runtime
+ * has just cold-started, or the framework process is still loading its config
+ * and MCP servers. Conceding on the first miss hands the user a different agent
+ * for a condition that resolves in about a second. The retry costs nothing on
+ * the happy path, because it only runs where the turn was already going to fall
+ * back.
+ */
+async function probeNativeWithGrace(config) {
+  if (await probeUrlReachable(config.url, config.token)) return true;
+  await new Promise((r) => setTimeout(r, 750));
+  return probeUrlReachable(config.url, config.token, 3000);
+}
+
+/**
  * Why a native gateway would not serve the turn, in terms the dashboard can act
  * on. The distinction matters because the remedies are different: an auth
  * failure is fixed by reconnecting, a missing endpoint by restarting the
@@ -1149,9 +1178,10 @@ async function handleChatCompletions(req, res) {
   let nativeFallback = null;
   if (backend.kind === "native" && backend.config) {
     let config = backend.config;
-    const reachable = await probeUrlReachable(config.url, config.token);
+    const reachable = await probeNativeWithGrace(config);
     if (!reachable) {
-      nativeFallback = { from: config.name, reason: "unreachable" };
+      nativeFallback = { from: config.name, reason: "unreachable", status: 0 };
+      lastNativeOutcome = { ...nativeFallback, backend: config.name, ok: false, at: new Date().toISOString() };
       console.warn(
         `[native-agent] native backend '${config.name}' unreachable at ${config.url} — falling back to bridge`
       );
@@ -1176,12 +1206,16 @@ async function handleChatCompletions(req, res) {
         }
       }
 
-      if (outcome.served) return;
+      if (outcome.served) {
+        lastNativeOutcome = { backend: config.name, ok: true, at: new Date().toISOString() };
+        return;
+      }
       nativeFallback = {
         from: config.name,
         reason: nativeFailureReason(outcome.status),
         status: outcome.status || 0,
       };
+      lastNativeOutcome = { ...nativeFallback, backend: config.name, ok: false, at: new Date().toISOString() };
       console.warn(
         `[native-agent] native backend '${config.name}' returned ${outcome.status || "unreachable"} (${nativeFallback.reason}) — falling back to bridge`
       );
@@ -1352,7 +1386,17 @@ const server = http.createServer(async (req, res) => {
     if (fwNative) {
       nativeBackends[fwNative.name] = await probeUrlReachable(fwNative.url, fwNative.token, 700);
     }
-    const defaultBackend = fwNative && nativeBackends[fwNative.name] ? "native" : "bridge";
+    // Reachable is not the same as working. If the last real turn was turned
+    // away for a reason a retry cannot fix, say bridge — that is what the next
+    // turn will actually use.
+    const stuck =
+      lastNativeOutcome &&
+      !lastNativeOutcome.ok &&
+      fwNative &&
+      lastNativeOutcome.backend === fwNative.name &&
+      STICKY_NATIVE_FAILURES.has(lastNativeOutcome.reason);
+    const defaultBackend =
+      fwNative && nativeBackends[fwNative.name] && !stuck ? "native" : "bridge";
     return sendJson(res, 200, {
       status: "ok",
       framework: FRAMEWORK,
@@ -1362,6 +1406,9 @@ const server = http.createServer(async (req, res) => {
       mode: defaultBackend,
       default_chat_backend: defaultBackend,
       native_backends: nativeBackends,
+      // The last turn's actual routing outcome, so an operator can tell
+      // "reachable but rejecting us" from "working".
+      last_native_outcome: lastNativeOutcome,
       tools_enabled: TOOLS_ENABLED,
       memory_enabled: MEMORY_ENABLED,
       agent_id: AGENT_ID || null,
