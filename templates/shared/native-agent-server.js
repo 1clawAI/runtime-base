@@ -245,9 +245,13 @@ function probeUrlReachable(targetUrl, token, timeoutMs = 1200) {
   });
 }
 
-// Proxy a chat request to a native gateway. OpenClaw is already OpenAI-shaped —
-// we forward the body verbatim (minus 1Claw-only routing/context keys the
-// gateway doesn't understand) and stream the SSE through unchanged.
+// Proxy a chat request to a native gateway. The gateway is already OpenAI-shaped
+// — we forward the body verbatim (minus 1Claw-only routing/context keys it
+// doesn't understand) and relay its SSE. Streaming is re-framed at event
+// boundaries so we can inject exactly one 1Claw meta event carrying the
+// backend's real model (Follow-up 1) without corrupting the stream; Hermes also
+// gets an X-Hermes-Session-Id header for per-conversation continuity
+// (Follow-up 2). Content is otherwise unchanged.
 //
 // Returns { served: true } once a 2xx response has been (or is being) relayed.
 // Returns { served: false } — leaving the response untouched so the caller can
@@ -257,7 +261,41 @@ const NATIVE_PASSTHROUGH_STRIP_KEYS = new Set([
   "backend", "template", "agent_name", "agent_description", "runtime_name",
   "memory_enabled", "memory_context", "use_own_key", "system_prompt_override",
   "provider",
+  // conversation_id is a 1Claw routing/continuity key, not part of the
+  // OpenAI request. For Hermes it becomes the X-Hermes-Session-Id *header*
+  // (see proxyToNative); it must never leak into the JSON body a native
+  // OpenAI-shaped gateway parses.
+  "conversation_id",
 ]);
+
+// A dashboard conversation id is always a server-minted UUID. Requiring that
+// exact shape before it can become the X-Hermes-Session-Id header (a) prevents
+// header injection (a UUID has no CR/LF, so node's http won't throw and no
+// value a client controls can smuggle extra headers) and (b) guarantees each
+// dashboard conversation maps to its own Hermes session — never one shared id.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function sessionIdFromBody(body) {
+  const cid = typeof body?.conversation_id === "string" ? body.conversation_id.trim() : "";
+  return UUID_RE.test(cid) ? cid : "";
+}
+
+// Pull the backend's real model out of one OpenAI-compatible SSE event. Chat
+// Completions chunks carry a top-level `model` (the model that actually
+// answered — e.g. Hermes' claude-opus-4.6), which is what lets the dashboard
+// badge show the true backend model in native mode rather than the dashboard's
+// own selected provider/model. Returns "" when the event has no usable model.
+function modelFromSseEvent(eventText) {
+  for (const line of eventText.split("\n")) {
+    const d = line.startsWith("data:") ? line.slice(5).trim() : "";
+    if (!d || d === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(d);
+      const m = typeof parsed?.model === "string" ? parsed.model.trim() : "";
+      if (m) return m;
+    } catch { /* not JSON (comment/keepalive) — skip */ }
+  }
+  return "";
+}
 
 function buildNativePayload(body) {
   const out = {};
@@ -279,6 +317,17 @@ function proxyToNative(config, body, res, wantStream) {
     "Content-Length": Buffer.byteLength(payload),
   };
   if (config.token) headers.Authorization = `Bearer ${config.token}`;
+  // Per-conversation continuity: Hermes' Chat Completions API is stateless
+  // unless the caller supplies X-Hermes-Session-Id. Threading the dashboard
+  // conversation id here scopes one Hermes session per dashboard conversation
+  // (never a single global id, which would merge every conversation's memory).
+  // Header-only + hermes-only: the id is stripped from the JSON body, and
+  // OpenClaw — which has no such header — is unaffected. sessionIdFromBody
+  // enforces a UUID so this can't inject headers.
+  const sessionId = sessionIdFromBody(body);
+  if (config.name === "hermes" && sessionId) {
+    headers["X-Hermes-Session-Id"] = sessionId;
+  }
   const opts = {
     protocol: u.protocol,
     hostname: u.hostname,
@@ -307,8 +356,49 @@ function proxyToNative(config, body, res, wantStream) {
         "X-1Claw-Chat-Mode": "native",
         "X-1Claw-Native-Backend": config.name,
       });
-      upstream.pipe(res);
-      upstream.on("end", () => resolve({ served: true }));
+
+      if (!wantStream) {
+        // Single JSON body — forward unchanged. The dashboard's non-stream
+        // path reads choices[0].message.content and doesn't consume the SSE
+        // model meta (streaming is the UI default), so there's nothing to add.
+        upstream.pipe(res);
+        upstream.on("end", () => resolve({ served: true }));
+        upstream.on("error", () => { try { res.end(); } catch { /* noop */ } resolve({ served: true }); });
+        return;
+      }
+
+      // Streaming path: forward the native SSE re-framed at event boundaries
+      // (SSE events end in a blank line), and — once — inject a 1Claw meta
+      // event carrying the backend's real model so the dashboard can label the
+      // badge with the model actually answering. Re-framing at "\n\n" is what
+      // makes the injection safe: the meta line is only ever written between
+      // complete events, never spliced into a partial chunk. This is
+      // content-preserving (same data lines, same order) and passes straight
+      // through the vault, which parses SSE line-by-line.
+      upstream.setEncoding("utf8");
+      let buf = "";
+      let metaSent = false;
+      const flushEvents = () => {
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const event = buf.slice(0, idx + 2); // include the terminating "\n\n"
+          buf = buf.slice(idx + 2);
+          if (!metaSent) {
+            const model = modelFromSseEvent(event);
+            if (model) {
+              res.write(`data: ${JSON.stringify({ oneclaw_backend: { name: config.name, model } })}\n\n`);
+              metaSent = true;
+            }
+          }
+          res.write(event);
+        }
+      };
+      upstream.on("data", (chunk) => { buf += chunk; flushEvents(); });
+      upstream.on("end", () => {
+        if (buf) res.write(buf); // trailing partial (e.g. no blank line after [DONE])
+        try { res.end(); } catch { /* noop */ }
+        resolve({ served: true });
+      });
       upstream.on("error", () => { try { res.end(); } catch { /* noop */ } resolve({ served: true }); });
     });
     req.on("error", () => resolve({ served: false }));
