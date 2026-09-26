@@ -953,8 +953,25 @@ async function agentLoop(messages, model, provider, useOwnKey, maxTokens, onEven
       const result = await executeTool(tc.function.name, args);
       const status = result && typeof result === "object" && result.error ? "error" : "completed";
 
-      onEvent?.({ id: tc.id, name: tc.function?.name, status, round: rounds });
-      toolCallsSummary.push({ id: tc.id, name: tc.function?.name, arguments: safeArgs, status });
+      // Same contract as chat-bridge.js: the terminal frame carries the reason
+      // and re-sends `arguments`, because the client upserts by id and would
+      // otherwise lose them the moment the tool finished.
+      const errorText =
+        status === "error" && typeof result.error === "string"
+          ? result.error.slice(0, 500)
+          : undefined;
+      onEvent?.({
+        id: tc.id,
+        name: tc.function?.name,
+        arguments: safeArgs,
+        status,
+        round: rounds,
+        ...(errorText ? { error: errorText } : {}),
+      });
+      toolCallsSummary.push({
+        id: tc.id, name: tc.function?.name, arguments: safeArgs, status,
+        ...(errorText ? { error: errorText } : {}),
+      });
 
       conversationMessages.push({
         role: "tool",

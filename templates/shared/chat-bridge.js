@@ -417,8 +417,30 @@ async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens,
       const result = await executeTool(tc.function?.name, args, context, toolModules);
       const status = result && typeof result === "object" && result.error ? "error" : "completed";
 
-      onEvent?.({ id: tc.id, name: tc.function?.name, status, round });
-      toolCallsSummary.push({ id: tc.id, name: tc.function?.name, arguments: safeArgs, status });
+      // Carry the reason and the arguments on the terminal frame too.
+      // Previously this emitted only {id, name, status, round}: the tool's own
+      // message ("Brave Search returned 429: ...") went into the conversation
+      // for the LLM but never to the browser, so the UI could say no more than
+      // `web_search failed`. And because the client upserts by id, dropping
+      // `arguments` here overwrote the ones sent with `started` — the chip
+      // stopped being expandable the instant the tool finished, so the only
+      // moment you could see what a tool was called with was while it ran.
+      const errorText =
+        status === "error" && typeof result.error === "string"
+          ? result.error.slice(0, 500)
+          : undefined;
+      onEvent?.({
+        id: tc.id,
+        name: tc.function?.name,
+        arguments: safeArgs,
+        status,
+        round,
+        ...(errorText ? { error: errorText } : {}),
+      });
+      toolCallsSummary.push({
+        id: tc.id, name: tc.function?.name, arguments: safeArgs, status,
+        ...(errorText ? { error: errorText } : {}),
+      });
 
       conversationMessages.push({
         role: "tool",
