@@ -49,6 +49,7 @@ const {
 const {
   sanitizeMessagesForLlm,
   sanitizeToolResultContent,
+  summarizeToolResult,
   isPromptTooLongError,
 } = require("./message-sanitize.js");
 
@@ -425,6 +426,7 @@ async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens,
       // `arguments` here overwrote the ones sent with `started` — the chip
       // stopped being expandable the instant the tool finished, so the only
       // moment you could see what a tool was called with was while it ran.
+      const resultSummary = status === "completed" ? summarizeToolResult(result) : undefined;
       const errorText =
         status === "error" && typeof result.error === "string"
           ? result.error.slice(0, 500)
@@ -435,10 +437,14 @@ async function callLlmWithTools(messages, model, provider, useOwnKey, maxTokens,
         arguments: safeArgs,
         status,
         round,
+        // Shape only — never the value. `get_secret` returns the secret,
+        // so the UI gets "1 field", not the field.
+        ...(resultSummary ? { resultSummary } : {}),
         ...(errorText ? { error: errorText } : {}),
       });
       toolCallsSummary.push({
         id: tc.id, name: tc.function?.name, arguments: safeArgs, status,
+        ...(resultSummary ? { resultSummary } : {}),
         ...(errorText ? { error: errorText } : {}),
       });
 

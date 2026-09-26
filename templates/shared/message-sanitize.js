@@ -55,6 +55,48 @@ function sanitizeToolResultContent(result) {
   return json;
 }
 
+/**
+ * A one-phrase description of what a tool returned, safe to show in the
+ * browser.
+ *
+ * Tool *results* have never reached the UI — only the name, the redacted
+ * arguments and whether it failed. So the transcript can say the agent
+ * called `list_secrets`, but not that it came back with three. When the
+ * agent then says "you have three secrets", there is nothing to check it
+ * against, and an agent you cannot check is one you have to trust
+ * completely.
+ *
+ * Results cannot be echoed: `get_secret` returns the secret. So this derives
+ * only *shape* — counts, field tallies, a bare "ok" — and never reproduces
+ * a value. Every branch returns a number or a fixed word; none interpolates
+ * result content. That invariant is the whole point of this function, and
+ * the tests below hold it against secret-shaped inputs.
+ */
+function summarizeToolResult(result) {
+  if (result === null || result === undefined) return undefined;
+
+  const plural = (n, noun) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+
+  if (Array.isArray(result)) return plural(result.length, "item");
+
+  if (typeof result !== "object") {
+    // A bare scalar could itself be the secret. Describe it, never show it.
+    if (typeof result === "string") return plural(result.length, "char");
+    if (typeof result === "boolean") return result ? "ok" : "false";
+    return typeof result;
+  }
+
+  // The usual container shapes, in the order tools tend to use them.
+  for (const key of ["items", "results", "secrets", "keys", "automations", "messages", "data"]) {
+    if (Array.isArray(result[key])) return plural(result[key].length, "item");
+  }
+  if (typeof result.count === "number") return plural(result.count, "item");
+  if (result.ok === true || result.success === true) return "ok";
+
+  const fields = Object.keys(result).length;
+  return fields ? plural(fields, "field") : "empty";
+}
+
 function sanitizeMessageForLlm(msg) {
   if (!msg || typeof msg !== "object") return msg;
   const out = { ...msg };
@@ -93,6 +135,7 @@ module.exports = {
   DATA_URI_PLACEHOLDER,
   sanitizeTextForLlm,
   sanitizeToolResultContent,
+  summarizeToolResult,
   sanitizeMessagesForLlm,
   sanitizeMessageForLlm,
   isPromptTooLongError,

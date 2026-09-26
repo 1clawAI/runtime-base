@@ -59,6 +59,7 @@ const { finalizeAssistantContent, supplementMissingImageGeneration } = require("
 const {
   sanitizeMessagesForLlm,
   sanitizeToolResultContent,
+  summarizeToolResult,
   isPromptTooLongError,
 } = require("./message-sanitize.js");
 
@@ -956,6 +957,7 @@ async function agentLoop(messages, model, provider, useOwnKey, maxTokens, onEven
       // Same contract as chat-bridge.js: the terminal frame carries the reason
       // and re-sends `arguments`, because the client upserts by id and would
       // otherwise lose them the moment the tool finished.
+      const resultSummary = status === "completed" ? summarizeToolResult(result) : undefined;
       const errorText =
         status === "error" && typeof result.error === "string"
           ? result.error.slice(0, 500)
@@ -966,10 +968,14 @@ async function agentLoop(messages, model, provider, useOwnKey, maxTokens, onEven
         arguments: safeArgs,
         status,
         round: rounds,
+        // Shape only — never the value. `get_secret` returns the secret,
+        // so the UI gets "1 field", not the field.
+        ...(resultSummary ? { resultSummary } : {}),
         ...(errorText ? { error: errorText } : {}),
       });
       toolCallsSummary.push({
         id: tc.id, name: tc.function?.name, arguments: safeArgs, status,
+        ...(resultSummary ? { resultSummary } : {}),
         ...(errorText ? { error: errorText } : {}),
       });
 
