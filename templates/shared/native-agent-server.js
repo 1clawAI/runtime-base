@@ -246,6 +246,44 @@ function probeUrlReachable(targetUrl, token, timeoutMs = 1200) {
   });
 }
 
+/**
+ * Why a native gateway would not serve the turn, in terms the dashboard can act
+ * on. The distinction matters because the remedies are different: an auth
+ * failure is fixed by reconnecting, a missing endpoint by restarting the
+ * runtime onto a current image, and an upstream error by neither.
+ */
+function nativeFailureReason(status) {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 404) return "not_enabled";
+  if (!status) return "unreachable";
+  if (status >= 500) return "upstream_error";
+  return "error";
+}
+
+/**
+ * Announce, on the SSE stream, that this answer came from the bridge after the
+ * native gateway declined — the dashboard turns it into a notice with the
+ * matching remedy. Written immediately after the headers so it lands before any
+ * content, and only onto a stream that is actually event-stream shaped.
+ */
+function writeFallbackMeta(res, fallback) {
+  if (!fallback) return;
+  try {
+    res.write(
+      `data: ${JSON.stringify({
+        oneclaw_backend: {
+          name: "bridge",
+          fallback_from: fallback.from,
+          reason: fallback.reason,
+          status: fallback.status || 0,
+        },
+      })}\n\n`
+    );
+  } catch {
+    /* the client went away; the turn's own error handling covers it */
+  }
+}
+
 // Proxy a chat request to a native gateway. The gateway is already OpenAI-shaped
 // — we forward the body verbatim (minus 1Claw-only routing/context keys it
 // doesn't understand) and relay its SSE. Streaming is re-framed at event
@@ -1102,17 +1140,50 @@ async function handleChatCompletions(req, res) {
   // ("native"). Any failure — unreachable, disabled endpoint, non-2xx — falls
   // back to the bridge path below with nothing written to `res`.
   const backend = resolveChatBackend(body);
+  // Set when a native turn could not be served and the bridge is standing in.
+  // Reported to the dashboard (see the meta frame below) because the bridge is
+  // a *different agent* — its own gpt-4o loop, without the framework's model,
+  // memory, skills or MCP toolset. Silently substituting it produced answers
+  // like "I don't have a mechanism to set a persistent goal" from a Hermes
+  // runtime that does. The user should be told, and offered the right remedy.
+  let nativeFallback = null;
   if (backend.kind === "native" && backend.config) {
-    const reachable = await probeUrlReachable(backend.config.url, backend.config.token);
-    if (reachable) {
-      const outcome = await proxyToNative(backend.config, body, res, Boolean(body.stream));
-      if (outcome.served) return;
+    let config = backend.config;
+    const reachable = await probeUrlReachable(config.url, config.token);
+    if (!reachable) {
+      nativeFallback = { from: config.name, reason: "unreachable" };
       console.warn(
-        `[native-agent] native backend '${backend.config.name}' returned ${outcome.status || "unreachable"} — falling back to bridge`
+        `[native-agent] native backend '${config.name}' unreachable at ${config.url} — falling back to bridge`
       );
     } else {
+      let outcome = await proxyToNative(config, body, res, Boolean(body.stream));
+
+      // Re-auth before giving up. The gateway's bearer is handed over through a
+      // 0600 file on disk; if it was rewritten after this request read it (a
+      // restarted setup step, a rotated handoff) the token in hand is stale and
+      // the gateway answers 401. Re-read it and, only when it has actually
+      // changed, retry once — the point is to recover the native agent rather
+      // than quietly answer as a different one. Nothing has been written to
+      // `res` on a non-2xx, so a retry is safe.
+      if (!outcome.served && (outcome.status === 401 || outcome.status === 403)) {
+        const refreshed = nativeBackendConfig(body?.template);
+        if (refreshed && refreshed.token && refreshed.token !== config.token) {
+          console.warn(
+            `[native-agent] native backend '${config.name}' rejected the handoff token (${outcome.status}); it was rotated — retrying with the current one`
+          );
+          config = refreshed;
+          outcome = await proxyToNative(config, body, res, Boolean(body.stream));
+        }
+      }
+
+      if (outcome.served) return;
+      nativeFallback = {
+        from: config.name,
+        reason: nativeFailureReason(outcome.status),
+        status: outcome.status || 0,
+      };
       console.warn(
-        `[native-agent] native backend '${backend.config.name}' unreachable at ${backend.config.url} — falling back to bridge`
+        `[native-agent] native backend '${config.name}' returned ${outcome.status || "unreachable"} (${nativeFallback.reason}) — falling back to bridge`
       );
     }
     // fall through to bridge (nothing written to res yet)
@@ -1163,6 +1234,7 @@ async function handleChatCompletions(req, res) {
       // turn — "native" is reserved for a proxy to a framework's own gateway.
       "X-1Claw-Chat-Mode": "bridge",
     });
+    writeFallbackMeta(res, nativeFallback);
     const onEvent = (ev) => res.write(`data: ${JSON.stringify({ tool_call: ev })}\n\n`);
 
     try {
@@ -1215,6 +1287,10 @@ async function handleChatCompletions(req, res) {
         Connection: "keep-alive",
         "X-1Claw-Chat-Mode": "bridge",
       });
+      // Only onto a stream the client will parse as SSE: a non-2xx passthrough
+      // relays the upstream's own JSON body, and an event frame ahead of it
+      // would make that unparseable.
+      if ((upstreamResp.statusCode || 0) === 200) writeFallbackMeta(res, nativeFallback);
       upstreamResp.pipe(res);
       upstreamResp.on("error", () => res.end());
     } catch (e) {
@@ -1243,6 +1319,16 @@ async function handleChatCompletions(req, res) {
         tool_calls_made: result.tool_calls_made,
       },
       tool_calls_summary: result.tool_calls_summary,
+      ...(nativeFallback
+        ? {
+            oneclaw_backend: {
+              name: "bridge",
+              fallback_from: nativeFallback.from,
+              reason: nativeFallback.reason,
+              status: nativeFallback.status || 0,
+            },
+          }
+        : {}),
     });
   } catch (e) {
     console.error("[native-agent] error:", e.message);
@@ -1309,9 +1395,16 @@ server.on("error", (err) => {
   process.exit(1);
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  const upstream = resolveLlmUpstream(DEFAULT_LLM_PROVIDER, false);
-  console.log(
-    `1claw native-agent-server (${FRAMEWORK}) on 127.0.0.1:${PORT} → ${upstream.url} (${upstream.via}) [tools=${TOOLS_ENABLED}, memory=${MEMORY_ENABLED}]`
-  );
-});
+// Bind only when run as the container's entrypoint (`node native-agent-server.js`,
+// from user-port.sh). Guarding it lets the unit tests require this file for its
+// pure helpers without racing for a port.
+if (require.main === module) {
+  server.listen(PORT, "127.0.0.1", () => {
+    const upstream = resolveLlmUpstream(DEFAULT_LLM_PROVIDER, false);
+    console.log(
+      `1claw native-agent-server (${FRAMEWORK}) on 127.0.0.1:${PORT} → ${upstream.url} (${upstream.via}) [tools=${TOOLS_ENABLED}, memory=${MEMORY_ENABLED}]`
+    );
+  });
+}
+
+module.exports = { nativeFailureReason, toChatCompletionsUrl };
