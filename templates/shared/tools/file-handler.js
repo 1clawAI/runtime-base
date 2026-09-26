@@ -10,7 +10,94 @@
 
 const http = require("http");
 const https = require("https");
+const dns = require("dns").promises;
+const net = require("net");
 const { URL } = require("url");
+
+/**
+ * PROMPTSSRF-L1. `read_url` used to reject exactly three literal hostnames —
+ * `localhost`, `127.0.0.1`, `0.0.0.0` — which is not an SSRF guard. `127.1`,
+ * `[::1]`, `2130706433`, any private address, and above all
+ * `169.254.169.254` (cloud metadata) all went straight through, as did any
+ * DNS name resolving to them. Redirects were followed with no re-check and
+ * no hop limit, so a public URL could bounce to loopback in one hop.
+ *
+ * The guard itself is pre-existing; what changed is that the research prompt
+ * now actively pushes the agent to `read_url` its search results, so the rate
+ * at which it fetches attacker-influenced pages went up and with it the value
+ * of prompt-injection-driven exfil.
+ *
+ * Residual, stated rather than hidden: this resolves and validates, then
+ * connects by hostname, so a DNS rebind between the two is still possible.
+ * Closing that needs connecting to the validated IP with an explicit Host
+ * header, which is a larger change than this finding warrants.
+ */
+const MAX_REDIRECTS = 5;
+
+function isBlockedIPv4(ip) {
+  const p = ip.split(".").map(Number);
+  if (p.length !== 4 || p.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
+  const [a, b] = p;
+  if (a === 0) return true; //           0.0.0.0/8  "this host"
+  if (a === 10) return true; //          10/8       private
+  if (a === 127) return true; //         127/8      loopback
+  if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGNAT
+  if (a === 169 && b === 254) return true; //           169.254/16 link-local, incl. metadata
+  if (a === 172 && b >= 16 && b <= 31) return true; //  172.16/12  private
+  if (a === 192 && b === 168) return true; //           192.168/16 private
+  if (a === 192 && b === 0) return true; //             192.0.0/24 IETF protocol assignments
+  if (a === 198 && (b === 18 || b === 19)) return true; // 198.18/15 benchmarking
+  if (a >= 224) return true; //          224/4 multicast, 240/4 reserved
+  return false;
+}
+
+function isBlockedIP(ip) {
+  if (net.isIPv4(ip)) return isBlockedIPv4(ip);
+  if (!net.isIPv6(ip)) return true;
+  const lower = ip.toLowerCase();
+  // IPv4-mapped (::ffff:127.0.0.1) and IPv4-compatible forms.
+  const mapped = lower.match(/^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return isBlockedIPv4(mapped[1]);
+  if (lower === "::1" || lower === "::") return true;
+  const head = lower.split(":")[0];
+  if (/^f[cd]/.test(head)) return true; // fc00::/7 unique-local
+  if (/^fe[89ab]/.test(head)) return true; // fe80::/10 link-local
+  if (head === "ff00" || /^ff/.test(head)) return true; // multicast
+  return false;
+}
+
+/** Throws if `url` names a host that resolves anywhere it should not. */
+async function assertPublicDestination(url) {
+  const u = new URL(url);
+  if (u.protocol !== "https:" && u.protocol !== "http:") {
+    throw new Error("Only http and https URLs are supported");
+  }
+
+  // A literal address needs no lookup — and must not get one, or a hostile
+  // resolver could answer for it.
+  const literal = u.hostname.replace(/^\[|\]$/g, "");
+  if (net.isIP(literal)) {
+    if (isBlockedIP(literal)) {
+      throw new Error(`Refusing to fetch a private or loopback address (${literal})`);
+    }
+    return;
+  }
+
+  let addrs;
+  try {
+    addrs = await dns.lookup(u.hostname, { all: true });
+  } catch {
+    throw new Error(`Could not resolve ${u.hostname}`);
+  }
+  if (!addrs.length) throw new Error(`Could not resolve ${u.hostname}`);
+  for (const { address } of addrs) {
+    if (isBlockedIP(address)) {
+      throw new Error(
+        `Refusing to fetch ${u.hostname}: it resolves to a private or loopback address`,
+      );
+    }
+  }
+}
 
 const analyzeImageDef = {
   type: "function",
@@ -68,7 +155,7 @@ function isAvailable(_env) {
   return true;
 }
 
-function httpGet(url, headers = {}, timeoutMs = 15000, maxBytes = 512 * 1024) {
+function httpGet(url, headers = {}, timeoutMs = 15000, maxBytes = 512 * 1024, redirectsLeft = MAX_REDIRECTS) {
   const u = new URL(url);
   const lib = u.protocol === "https:" ? https : http;
   const opts = {
@@ -92,10 +179,20 @@ function httpGet(url, headers = {}, timeoutMs = 15000, maxBytes = 512 * 1024) {
         resp.statusCode < 400 &&
         resp.headers.location
       ) {
-        httpGet(resp.headers.location, headers, timeoutMs, maxBytes)
+        // PROMPTSSRF-L1: a redirect is a new destination, so it gets the
+        // same check as the first one — a public URL that bounces to
+        // 169.254.169.254 was previously followed without question. The hop
+        // limit stops a redirect loop from being a denial of service.
+        resp.resume();
+        const next = new URL(resp.headers.location, url).toString();
+        if (redirectsLeft <= 0) {
+          reject(new Error("Too many redirects"));
+          return;
+        }
+        assertPublicDestination(next)
+          .then(() => httpGet(next, headers, timeoutMs, maxBytes, redirectsLeft - 1))
           .then(resolve)
           .catch(reject);
-        resp.resume();
         return;
       }
 
@@ -257,15 +354,14 @@ async function executeReadUrl(args, _context) {
   if (!url) return { error: "url is required" };
 
   try {
-    const u = new URL(url);
-    if (u.protocol !== "https:" && u.protocol !== "http:") {
-      return { error: "Only http and https URLs are supported" };
-    }
-    if (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "0.0.0.0") {
-      return { error: "Local URLs are not allowed" };
-    }
+    new URL(url);
   } catch {
     return { error: "Invalid URL format" };
+  }
+  try {
+    await assertPublicDestination(url);
+  } catch (e) {
+    return { error: e.message };
   }
 
   const maxLength = Math.min(args.max_length || 8000, 50000);
@@ -309,6 +405,8 @@ async function execute(name, args, context) {
 }
 
 module.exports = {
+  assertPublicDestination,
+  isBlockedIP,
   definitions: [analyzeImageDef, readUrlDef],
   isAvailable,
   execute,
