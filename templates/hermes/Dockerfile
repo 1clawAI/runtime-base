@@ -9,6 +9,10 @@ RUN test -x /usr/local/bin/shroud-sidecar
 # CLI_VERSION + CLI_CACHEBUST invalidate the npm layer so rebuilds fetch @latest from the registry.
 ARG CLI_VERSION=latest
 ARG CLI_CACHEBUST=1
+# A commit SHA, passed by the build workflow from this monorepo's gitlink.
+# `main` remains the default only so a manual `docker build` still works;
+# CI always passes an explicit SHA. Fetched by ref rather than cloned with
+# --branch, because --branch cannot take a SHA.
 ARG ONECLAW_HERMES_REF=main
 ARG HERMES_AGENT_INSTALL=1
 
@@ -21,9 +25,11 @@ COPY shared/fix-esm-imports.mjs /tmp/fix-esm-imports.mjs
 # 1claw-hermes integration package (github.com/1clawAI/1claw-hermes)
 # Base image sets NODE_ENV=production; --include=dev installs typescript + @types/node for tsc.
 RUN echo "Installing 1claw-hermes@${ONECLAW_HERMES_REF}" && \
-    git clone --depth 1 --branch "${ONECLAW_HERMES_REF}" \
-      https://github.com/1clawAI/1claw-hermes.git /opt/1claw-hermes && \
-    cd /opt/1claw-hermes && npm install --include=dev && npm run build && \
+    mkdir -p /opt/1claw-hermes && cd /opt/1claw-hermes && git init -q && \
+    git remote add origin https://github.com/1clawAI/1claw-hermes.git && \
+    git fetch -q --depth 1 origin "${ONECLAW_HERMES_REF}" && \
+    git checkout -q FETCH_HEAD && \
+    npm install --include=dev && npm run build && \
     npm install -g /opt/1claw-hermes && \
     node /tmp/fix-esm-imports.mjs \
       /opt/1claw-hermes/node_modules/@1claw/sdk \

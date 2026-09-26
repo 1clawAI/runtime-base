@@ -15,6 +15,8 @@ RUN test -x /usr/local/bin/shroud-sidecar
 ARG AGENT_VERSION=latest
 ARG CLI_VERSION=latest
 ARG CLI_CACHEBUST=1
+# A commit SHA, passed by the build workflow from this monorepo's gitlink.
+# See the hermes template for why this is fetched rather than cloned.
 ARG ONECLAW_OPENCLAW_PLUGIN_REF=main
 ARG OPENCLAW_PLUGIN_VERSION=latest
 
@@ -32,8 +34,11 @@ COPY shared/fix-esm-imports.mjs /tmp/fix-esm-imports.mjs
 
 # @1claw/openclaw-plugin from github.com/1clawAI/1claw-openclaw-plugin
 RUN echo "Installing 1claw-openclaw-plugin@${ONECLAW_OPENCLAW_PLUGIN_REF}" && \
-    git clone --depth 1 --branch "${ONECLAW_OPENCLAW_PLUGIN_REF}" \
-      https://github.com/1clawAI/1claw-openclaw-plugin.git /opt/1claw-openclaw-plugin && \
+    mkdir -p /opt/1claw-openclaw-plugin && cd /opt/1claw-openclaw-plugin && \
+    git init -q && \
+    git remote add origin https://github.com/1clawAI/1claw-openclaw-plugin.git && \
+    git fetch -q --depth 1 origin "${ONECLAW_OPENCLAW_PLUGIN_REF}" && \
+    git checkout -q FETCH_HEAD && \
     npm install -g "openclaw@${AGENT_VERSION}"
 
 RUN cd /app/workspace && \
