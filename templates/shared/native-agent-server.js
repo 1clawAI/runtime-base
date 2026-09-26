@@ -247,6 +247,22 @@ function probeUrlReachable(targetUrl, token, timeoutMs = 1200) {
 }
 
 /**
+ * The `X-1Claw-Chat-Mode` this server reports when it serves a turn itself.
+ *
+ * "bridge" means a plain LLM relay with no tool access, and the dashboard reads
+ * it that way: it labels the badge "no direct tool access" and hides every tool
+ * command and tool-using suggested prompt. The tool-enabled path here reported
+ * "bridge" anyway, on turns that had just run an agent loop with the full 1Claw
+ * toolset — so a runtime with tools looked like one without. chat-bridge.js had
+ * the same bug and was fixed; this file is the other half of the same pair.
+ *
+ * A function rather than two literals, so the two call sites cannot drift.
+ */
+function bridgeChatMode(toolsEnabled) {
+  return toolsEnabled ? "bridge-tools" : "bridge";
+}
+
+/**
  * What happened the last time a turn was routed at the native gateway.
  *
  * /health could only report reachability, and a gateway that answers 401 is
@@ -1266,7 +1282,7 @@ async function handleChatCompletions(req, res) {
       Connection: "keep-alive",
       // The 1Claw bridge (this server's own tool-enabled agent loop) served the
       // turn — "native" is reserved for a proxy to a framework's own gateway.
-      "X-1Claw-Chat-Mode": "bridge",
+      "X-1Claw-Chat-Mode": bridgeChatMode(TOOLS_ENABLED),
     });
     writeFallbackMeta(res, nativeFallback);
     const onEvent = (ev) => res.write(`data: ${JSON.stringify({ tool_call: ev })}\n\n`);
@@ -1319,7 +1335,7 @@ async function handleChatCompletions(req, res) {
         "Content-Type": upstreamResp.headers["content-type"] || "text/event-stream",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
-        "X-1Claw-Chat-Mode": "bridge",
+        "X-1Claw-Chat-Mode": bridgeChatMode(TOOLS_ENABLED),
       });
       // Only onto a stream the client will parse as SSE: a non-2xx passthrough
       // relays the upstream's own JSON body, and an event frame ahead of it
@@ -1454,4 +1470,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { nativeFailureReason, toChatCompletionsUrl };
+module.exports = { nativeFailureReason, toChatCompletionsUrl, bridgeChatMode };

@@ -74,3 +74,46 @@ test("gateway base URLs normalise to one endpoint", () => {
   assert.equal(toChatCompletionsUrl("http://127.0.0.1:8642/v1/"), want);
   assert.equal(toChatCompletionsUrl("http://127.0.0.1:8642/v1/chat/completions"), want);
 });
+
+/**
+ * The dashboard reads `X-1Claw-Chat-Mode` literally: "bridge" means a plain LLM
+ * relay, and it responds by labelling the badge "no direct tool access" and
+ * hiding every tool command and tool-using suggested prompt. So a tool-enabled
+ * turn that reports "bridge" makes a runtime with the full 1Claw toolset look
+ * like one without. chat-bridge.js was fixed for this; native-agent-server.js
+ * was not, which is the same defect twice in a pair of files.
+ */
+const fs = require("node:fs");
+const path = require("node:path");
+const { bridgeChatMode } = require("../native-agent-server.js");
+
+test("a tool-enabled turn is not reported as a plain relay", () => {
+  assert.equal(bridgeChatMode(true), "bridge-tools");
+  assert.equal(bridgeChatMode(false), "bridge");
+});
+
+test("both servers spell the tool-enabled mode the same way", () => {
+  // The dashboard matches on the exact string; a typo in either file silently
+  // downgrades that server's runtimes.
+  const chatBridge = fs.readFileSync(
+    path.join(__dirname, "..", "chat-bridge.js"),
+    "utf8",
+  );
+  const emitted = [...chatBridge.matchAll(/"X-1Claw-Chat-Mode":\s*"([^"]+)"/g)].map(
+    (m) => m[1],
+  );
+  assert.ok(
+    emitted.length > 0,
+    "chat-bridge.js no longer sets X-1Claw-Chat-Mode — the dashboard cannot tell what served the turn",
+  );
+  for (const mode of emitted) {
+    assert.ok(
+      ["bridge", "bridge-tools", "native"].includes(mode),
+      `chat-bridge.js emits an unrecognised chat mode "${mode}"`,
+    );
+  }
+  assert.ok(
+    emitted.includes(bridgeChatMode(true)),
+    `chat-bridge.js runs tools but never emits "${bridgeChatMode(true)}" — the two servers have drifted`,
+  );
+});
