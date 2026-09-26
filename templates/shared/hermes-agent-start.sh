@@ -34,50 +34,41 @@ if ! command -v hermes >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# In-container native chat adapter (1clawAI/1claw-hermes).
+# Native dashboard chat → Hermes' own OpenAI-compatible API server.
 #
-# The adapter is an OpenAI-compatible SSE server on loopback :8778 that the
-# 1Claw bridge (native-agent-server.js) proxies dashboard chat to when it's
-# healthy ("native" mode). It runs ALONGSIDE `hermes gateway` (below) — it does
-# not replace it. If the adapter isn't present (image built before it shipped)
-# or fails to come up, the bridge's reachability probe simply falls back to its
-# own tool-enabled agent loop, so this launch is best-effort and never fatal.
+# `hermes gateway` (below) can expose an OpenAI-compatible HTTP API on loopback
+# :8642 that runs the SAME agent as the Terminal TUI — same configured model,
+# MCP toolset, skills and profile-global memory (MEMORY.md / USER.md). The 1Claw
+# bridge (native-agent-server.js) proxies dashboard chat to it ("native" mode)
+# so the dashboard answers as the Hermes model (e.g. claude-opus-4.6 via the
+# Shroud sidecar) instead of the bridge's own gpt-4o loop, and both surfaces
+# share one agent memory. If the API server isn't reachable (older image, or the
+# token below is missing), the bridge's health probe transparently falls back to
+# its own tool-enabled agent loop — so enabling it here is safe and non-fatal.
 #
-# Token handoff mirrors OpenClaw: hermes-native-setup.js writes a 0600 token
-# file, we read it and export ONECLAW_HERMES_NATIVE_TOKEN for the adapter, and
-# the bridge reads the same file (resolveHermesToken) in its own process.
-ONECLAW_HERMES_NATIVE_HOST="${ONECLAW_HERMES_NATIVE_HOST:-127.0.0.1}"
-ONECLAW_HERMES_NATIVE_PORT="${ONECLAW_HERMES_NATIVE_PORT:-8778}"
-export ONECLAW_HERMES_NATIVE_HOST ONECLAW_HERMES_NATIVE_PORT
+# Auth handoff mirrors OpenClaw: hermes-native-setup.js writes a 0600 token file;
+# we read it and hand it to Hermes as API_SERVER_KEY, and the bridge reads the
+# same file (resolveHermesToken) in its own process, so their bearers match. The
+# token value is never echoed. Env vars take precedence over ~/.hermes config.
+API_SERVER_HOST="${API_SERVER_HOST:-127.0.0.1}"
+API_SERVER_PORT="${API_SERVER_PORT:-8642}"
+export API_SERVER_HOST API_SERVER_PORT
 
-# The `hermes` completion invocation the adapter shells out to.
-#
-#   !!! UNVERIFIED PLACEHOLDER !!!
-#   Hermes (Nous Research) exposes NO documented one-shot chat/completion CLI.
-#   The args below are a plausible stdin-prompt/stdout-text contract that has
-#   NOT been validated against a real `hermes` binary. Native-hermes chat MUST
-#   be validated in a rebuilt runtime before it is trusted; until then the
-#   bridge health-probe fallback protects existing runtimes. Override at runtime
-#   with ONECLAW_HERMES_CLI / ONECLAW_HERMES_CLI_ARGS (JSON array) once the real
-#   invocation is known — no image rebuild required to correct it.
-export ONECLAW_HERMES_CLI="${ONECLAW_HERMES_CLI:-hermes}"
-export ONECLAW_HERMES_CLI_ARGS="${ONECLAW_HERMES_CLI_ARGS:-[\"run\",\"--json\",\"--stream\"]}"
-
-ONECLAW_HERMES_ADAPTER_ENTRY="${ONECLAW_HERMES_ADAPTER_ENTRY:-/opt/1claw-hermes/dist/adapter/serve.js}"
-if [ -f "$ONECLAW_HERMES_ADAPTER_ENTRY" ]; then
-  if [ -f /app/hermes-native-setup.js ]; then
-    node /app/hermes-native-setup.js || echo "WARN: hermes-native-setup.js failed (adapter will run without a token)" >&2
+if [ -f /app/hermes-native-setup.js ]; then
+  node /app/hermes-native-setup.js || echo "WARN: hermes-native-setup.js failed (API server will run without a key)" >&2
+fi
+HERMES_TOKEN_FILE="${ONECLAW_HERMES_TOKEN_FILE:-${HERMES_CONFIG_DIR:-${HOME}/.hermes}/native-loopback-token}"
+if [ -f "$HERMES_TOKEN_FILE" ]; then
+  HERMES_API_SERVER_KEY="$(cat "$HERMES_TOKEN_FILE" 2>/dev/null | tr -d '\n\r')"
+  if [ -n "$HERMES_API_SERVER_KEY" ]; then
+    export API_SERVER_ENABLED="${API_SERVER_ENABLED:-true}"
+    export API_SERVER_KEY="${API_SERVER_KEY:-$HERMES_API_SERVER_KEY}"
+    echo "hermes-agent-start: Hermes API server enabled on ${API_SERVER_HOST}:${API_SERVER_PORT} (native dashboard chat)" >&2
+  else
+    echo "WARN: native-loopback-token empty — Hermes API server not enabled; dashboard chat will use the 1Claw bridge" >&2
   fi
-  # Read the provisioned token into the adapter's env (never echo the value).
-  HERMES_TOKEN_FILE="${ONECLAW_HERMES_TOKEN_FILE:-${HERMES_CONFIG_DIR:-${HOME}/.hermes}/native-loopback-token}"
-  if [ -z "${ONECLAW_HERMES_NATIVE_TOKEN:-}" ] && [ -f "$HERMES_TOKEN_FILE" ]; then
-    ONECLAW_HERMES_NATIVE_TOKEN="$(cat "$HERMES_TOKEN_FILE" 2>/dev/null | tr -d '\n\r')"
-    export ONECLAW_HERMES_NATIVE_TOKEN
-  fi
-  echo "hermes-agent-start: launching 1claw-hermes adapter on ${ONECLAW_HERMES_NATIVE_HOST}:${ONECLAW_HERMES_NATIVE_PORT}" >&2
-  node "$ONECLAW_HERMES_ADAPTER_ENTRY" &
 else
-  echo "WARN: 1claw-hermes adapter not found at ${ONECLAW_HERMES_ADAPTER_ENTRY} — native chat will fall back to the 1Claw bridge" >&2
+  echo "WARN: no native-loopback-token — Hermes API server not enabled; dashboard chat will use the 1Claw bridge" >&2
 fi
 
 # Respect env toggles from dashboard wizard (ENABLE_SHROUD, etc. are already on the container).

@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * Provision the loopback auth token for the in-container Hermes adapter.
+ * Provision the loopback auth token for Hermes' built-in API server.
  *
- * The 1claw-hermes OpenAI-compatible SSE adapter (started by
- * hermes-agent-start.sh on 127.0.0.1:8778) authenticates the in-container
- * bridge (native-agent-server.js) with a bearer token. The adapter reads the
- * token from ONECLAW_HERMES_NATIVE_TOKEN (env only); the bridge reads it from
- * that env var OR — because the two run in *separate processes that do not
- * share an env* — from a 0600 file on disk (resolveHermesToken()). This script
- * is the writer of that file, mirroring the token half of
- * openclaw-runtime-setup.js.
+ * Hermes' own OpenAI-compatible API server (started by hermes-agent-start.sh on
+ * 127.0.0.1:8642 as part of `hermes gateway`) authenticates callers with a
+ * bearer token (API_SERVER_KEY). hermes-agent-start.sh reads the token this
+ * script writes and exports it as API_SERVER_KEY; the 1Claw bridge
+ * (native-agent-server.js) reads the same 0600 file (resolveHermesToken()) —
+ * because the two run in *separate processes that do not share an env* — so
+ * their bearers match. This script is the writer of that file, mirroring the
+ * token half of openclaw-runtime-setup.js.
  *
  * Persist once and reuse across restarts so the token is stable for the
  * lifetime of the container filesystem. Prints the token *path* (never the
