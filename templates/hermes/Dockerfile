@@ -15,6 +15,8 @@ ARG CLI_CACHEBUST=1
 # --branch, because --branch cannot take a SHA.
 ARG ONECLAW_HERMES_REF=main
 ARG HERMES_AGENT_INSTALL=1
+# Optional pin for the Hermes installer; empty means "log the hash, don't enforce".
+ARG HERMES_INSTALLER_SHA256=
 
 # Global CLI for interactive shell (1claw --help, secret pull, etc.)
 RUN echo "Installing @1claw/cli@${CLI_VERSION} (cachebust=${CLI_CACHEBUST})" && \
@@ -83,10 +85,27 @@ RUN apt-get update \
     && chown -R appuser:appuser /app/.npm /app/.local
 
 USER appuser
+# HERMESPATH-L1: `curl … | bash` gives the build no record of what it ran and
+# no way to notice upstream changing under it. The script is fetched to a file
+# first, its SHA-256 recorded in the build log, and only then executed — so a
+# later "what shipped in this image?" has an answer.
+#
+# A pinned checksum is opt-in rather than hardcoded: upstream publishes a
+# rolling installer, so a baked-in hash would break every build the day they
+# touch it, and the predictable response to that is to delete the check.
+# `--build-arg HERMES_INSTALLER_SHA256=<hash>` enforces one when a caller
+# wants reproducibility; without it the hash is still logged.
 RUN if [ "${HERMES_AGENT_INSTALL}" = "1" ]; then \
-      curl -fsSL https://hermes-agent.nousresearch.com/install.sh | \
-        bash -s -- --skip-browser || \
+      curl -fsSL https://hermes-agent.nousresearch.com/install.sh -o /tmp/hermes-install.sh && \
+      ACTUAL="$(sha256sum /tmp/hermes-install.sh | cut -d" " -f1)" && \
+      echo "Hermes installer sha256=${ACTUAL}" && \
+      if [ -n "${HERMES_INSTALLER_SHA256}" ] && [ "${ACTUAL}" != "${HERMES_INSTALLER_SHA256}" ]; then \
+        echo "FATAL: Hermes installer sha256 ${ACTUAL} != pinned ${HERMES_INSTALLER_SHA256}"; \
+        exit 1; \
+      fi && \
+      bash /tmp/hermes-install.sh --skip-browser || \
       echo "WARN: Hermes Agent install failed — rebuild or install via Terminal"; \
+      rm -f /tmp/hermes-install.sh; \
     fi
 
 # Fail the build rather than ship an image whose agent is missing.
@@ -105,7 +124,7 @@ RUN if [ "${HERMES_AGENT_INSTALL}" = "1" ]; then \
         ls -la "${HOME}/.local/bin" 2>/dev/null || echo "  (${HOME}/.local/bin does not exist)"; \
         ls -la "${HERMES_HOME}/bin" 2>/dev/null || echo "  (${HERMES_HOME}/bin does not exist)"; \
         echo "--- reproducing the installer's Node step with output visible ---"; \
-        echo "    (it runs `npm install --silent` and discards the log when empty,"; \
+        echo '    (it runs `npm install --silent` and discards the log when empty,'; \
         echo "     so the only way to see the real error is to run it ourselves)"; \
         if [ -d "${HERMES_HOME}/hermes-agent" ]; then \
           cd "${HERMES_HOME}/hermes-agent" && \
@@ -121,7 +140,14 @@ RUN if [ "${HERMES_AGENT_INSTALL}" = "1" ]; then \
     fi
 USER root
 
+# HERMESPATH-L1: `ENV PATH` above puts $HERMES_HOME/bin and /app/.local/bin —
+# both appuser-writable, both populated by an unpinned `curl … | bash` that
+# runs as appuser — ahead of the system directories. A root RUN after that
+# point resolves `npm`/`node` through them first, so a compromised upstream
+# installer could drop a shim and have it executed as root at build time.
+# Root steps therefore use a system-only PATH.
 RUN cd /app/workspace && \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     npm install --save \
       @1claw/sdk \
       @1claw/mcp \
@@ -157,7 +183,9 @@ COPY shared/tools/ /app/tools/
 COPY hermes/tools-config.js /app/tools-config.js
 USER root
 ENV ENABLE_CODE_EXEC=true
-RUN chmod +x /app/template-entrypoint.sh /app/user-port.sh /app/hermes-agent-start.sh \
+# HERMESPATH-L1: system-only PATH for this root step too.
+RUN PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    chmod +x /app/template-entrypoint.sh /app/user-port.sh /app/hermes-agent-start.sh \
     && chown appuser:appuser /app/chat-bridge.js /app/1claw-capabilities-prompt.js /app/agent-token.js /app/native-agent-server.js /app/image-gen.js /app/image-gen-request.js /app/generated-image-cache.js /app/message-sanitize.js \
        /app/user-port.sh /app/hermes-agent-start.sh /app/hermes-native-setup.js /app/tools/ /app/tools-config.js
 USER appuser
