@@ -40,6 +40,7 @@ const {
 const {
   acceptRefreshedAgentToken,
   getAgentToken,
+  startAgentTokenRenewal,
 } = require("./agent-token.js");
 const { build1ClawCapabilitiesPrompt } = require("./1claw-capabilities-prompt.js");
 const {
@@ -737,6 +738,11 @@ server.on("error", (err) => {
   console.error("[chat-bridge] listen error:", err.message);
   process.exit(1);
 });
+
+// Keep this container's agent JWT alive for as long as it runs. Without it the
+// credential read at instance start expires after ~2h and every credentialed
+// call 401s until someone restarts the runtime.
+startAgentTokenRenewal();
 
 server.listen(PORT, "127.0.0.1", () => {
   const upstream = resolveUpstream(DEFAULT_PROVIDER, false);

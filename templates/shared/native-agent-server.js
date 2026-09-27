@@ -44,6 +44,7 @@ const {
   acceptRefreshedAgentToken,
   apiAuthHeaders,
   getAgentToken,
+  startAgentTokenRenewal,
 } = require("./agent-token.js");
 const {
   getAvailableTools,
@@ -1473,6 +1474,11 @@ server.on("error", (err) => {
 // from user-port.sh). Guarding it lets the unit tests require this file for its
 // pure helpers without racing for a port.
 if (require.main === module) {
+  // Keep this container's agent JWT alive for as long as it runs. Without it
+  // the credential read at instance start expires after ~2h and every
+  // credentialed call 401s until someone restarts the runtime.
+  startAgentTokenRenewal();
+
   server.listen(PORT, "127.0.0.1", () => {
     const upstream = resolveLlmUpstream(DEFAULT_LLM_PROVIDER, false);
     console.log(
