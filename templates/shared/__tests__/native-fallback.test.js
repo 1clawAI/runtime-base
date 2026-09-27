@@ -117,3 +117,73 @@ test("both servers spell the tool-enabled mode the same way", () => {
     `chat-bridge.js runs tools but never emits "${bridgeChatMode(true)}" — the two servers have drifted`,
   );
 });
+
+/**
+ * `hermes gateway` takes its bearer from `API_SERVER_KEY` when the container
+ * has one, and only otherwise from the handoff file:
+ *
+ *   API_SERVER_KEY="${API_SERVER_KEY:-$(cat native-loopback-token)}"
+ *
+ * The bridge only ever read the file. So a runtime whose own environment set
+ * API_SERVER_KEY — a perfectly ordinary thing to do — gave Hermes one bearer
+ * and the bridge another, and every dashboard turn 401'd and silently fell
+ * through to a different agent. Permanently, with nothing the user could see
+ * or do. These pin the two to the same resolution order.
+ */
+const { resolveHermesToken } = require("../native-agent-server.js");
+
+function withEnv(vars, fn) {
+  const saved = {};
+  for (const [k, v] of Object.entries(vars)) {
+    saved[k] = process.env[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+// A path that cannot exist, so the file branch is out of the picture.
+const NO_FILE = "/nonexistent/1claw-test/native-loopback-token";
+
+test("the bridge uses the key Hermes was actually started with", () => {
+  const got = withEnv(
+    {
+      ONECLAW_HERMES_NATIVE_TOKEN: undefined,
+      API_SERVER_KEY: "key-from-the-runtime-environment",
+      ONECLAW_HERMES_TOKEN_FILE: NO_FILE,
+    },
+    resolveHermesToken,
+  );
+  assert.equal(got, "key-from-the-runtime-environment");
+});
+
+test("an explicit 1Claw override still wins", () => {
+  const got = withEnv(
+    {
+      ONECLAW_HERMES_NATIVE_TOKEN: "explicit-override",
+      API_SERVER_KEY: "key-from-the-runtime-environment",
+      ONECLAW_HERMES_TOKEN_FILE: NO_FILE,
+    },
+    resolveHermesToken,
+  );
+  assert.equal(got, "explicit-override");
+});
+
+test("no key anywhere is empty, not a crash", () => {
+  const got = withEnv(
+    {
+      ONECLAW_HERMES_NATIVE_TOKEN: undefined,
+      API_SERVER_KEY: undefined,
+      ONECLAW_HERMES_TOKEN_FILE: NO_FILE,
+    },
+    resolveHermesToken,
+  );
+  assert.equal(got, "");
+});

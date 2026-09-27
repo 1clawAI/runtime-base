@@ -148,6 +148,17 @@ function defaultHermesTokenFile() {
 function resolveHermesToken() {
   const envTok = process.env.ONECLAW_HERMES_NATIVE_TOKEN;
   if (envTok && envTok.trim()) return envTok.trim();
+
+  // API_SERVER_KEY, when the container has one, is *the* key Hermes was
+  // started with: hermes-agent-start.sh does
+  // `API_SERVER_KEY="${API_SERVER_KEY:-<file>}"`, so a value set in the
+  // runtime's own environment wins there. This side only ever read the file,
+  // so a tenant who set API_SERVER_KEY gave Hermes one bearer and the bridge
+  // another — a 401 on every turn, permanently, with no way for the user to
+  // see or fix it. Read it from the same place Hermes does, in the same order.
+  const serverKey = process.env.API_SERVER_KEY;
+  if (serverKey && serverKey.trim()) return serverKey.trim();
+
   const file = process.env.ONECLAW_HERMES_TOKEN_FILE || defaultHermesTokenFile();
   try {
     const t = fs.readFileSync(file, "utf8").trim();
@@ -1470,4 +1481,9 @@ if (require.main === module) {
   });
 }
 
-module.exports = { nativeFailureReason, toChatCompletionsUrl, bridgeChatMode };
+module.exports = {
+  nativeFailureReason,
+  toChatCompletionsUrl,
+  bridgeChatMode,
+  resolveHermesToken,
+};
