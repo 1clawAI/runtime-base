@@ -211,15 +211,23 @@ test("every streaming path reports the container's capabilities", () => {
   );
 });
 
-test("chat-bridge reports the same way", () => {
+test("chat-bridge reports from both of its SSE paths", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "chat-bridge.js"), "utf8");
-  assert.ok(
-    src.includes("oneclaw_runtime"),
-    "chat-bridge.js never reports capabilities, so templates running it read as stale",
-  );
   assert.ok(
     src.includes("agent_token_renewal"),
     "chat-bridge.js must claim agent_token_renewal — it starts the renewal loop",
+  );
+  // It opens SSE in two places: the tool loop, and the tool-less passthrough
+  // below it. The second was missed on the first pass, which would have told
+  // everyone running a tools-disabled runtime that they were behind when they
+  // were not — this repo's most common defect shape, one of two symmetric
+  // paths getting the change.
+  const calls = (src.match(/(?<!function\s)writeRuntimeMeta\(res\)/g) || []).length;
+  assert.equal(
+    calls,
+    2,
+    `writeRuntimeMeta is called ${calls} times in chat-bridge.js; both the tool ` +
+      `loop and the tool-less streaming passthrough need it`,
   );
 });
 

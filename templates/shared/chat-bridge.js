@@ -43,6 +43,28 @@ const {
   startAgentTokenRenewal,
 } = require("./agent-token.js");
 const { build1ClawCapabilitiesPrompt } = require("./1claw-capabilities-prompt.js");
+
+/**
+ * What this container can do, reported once per streamed turn.
+ *
+ * The dashboard reads the *absence* of this as "old container" — that is the
+ * only signal available, since a running runtime keeps whatever image it
+ * started with and nothing records which build that was. So every path that
+ * opens an SSE response has to send it, or perfectly current runtimes are told
+ * an update is waiting. Keep the names in step with RUNTIME_FEATURES in
+ * native-agent-server.js.
+ */
+const RUNTIME_FEATURES = ["agent_token_renewal", "native_fallback_reporting"];
+
+function writeRuntimeMeta(res) {
+  try {
+    res.write(
+      `data: ${JSON.stringify({ oneclaw_runtime: { features: RUNTIME_FEATURES } })}\n\n`
+    );
+  } catch {
+    /* client gone */
+  }
+}
 const {
   finalizeAssistantContent,
   supplementMissingImageGeneration,
@@ -546,20 +568,7 @@ async function handleChatCompletions(req, res) {
           "X-1Claw-Chat-Mode": "bridge-tools",
         });
         sseHeadersSent = true;
-        // Capability report — see RUNTIME_FEATURES in native-agent-server.js.
-        // A template that runs chat-bridge instead of the native server must
-        // say the same thing, or the dashboard reads its runtimes as stale.
-        try {
-          res.write(
-            `data: ${JSON.stringify({
-              oneclaw_runtime: {
-                features: ["agent_token_renewal", "native_fallback_reporting"],
-              },
-            })}\n\n`
-          );
-        } catch {
-          /* client gone */
-        }
+        writeRuntimeMeta(res);
         // Live tool-call visibility: written to the response as each tool
         // starts/finishes, not buffered until the whole loop resolves — this
         // is what turns "blank spinner for N seconds" into watching the
@@ -692,6 +701,13 @@ async function handleChatCompletions(req, res) {
         "X-1Claw-Chat-Bridge": FRAMEWORK,
         "X-1Claw-Chat-Via": upstream.via,
       });
+      // The tool-less path needs the capability report as much as the tool
+      // loop above: the dashboard treats a turn that reports nothing as an old
+      // container, so leaving this one out would tell everyone running a
+      // tools-disabled runtime that they are behind when they are not. Only on
+      // a 200 — a non-2xx relays the upstream's own body, which an event frame
+      // would corrupt.
+      if ((upstreamResp.statusCode || 0) === 200) writeRuntimeMeta(res);
     }
     upstreamResp.pipe(res);
     upstreamResp.on("error", (e) => {
