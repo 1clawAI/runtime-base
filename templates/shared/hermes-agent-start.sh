@@ -18,6 +18,39 @@ case ":${PATH}:" in
   *) PATH="${HERMES_HOME}/bin:${PATH}"; export PATH ;;
 esac
 
+# ---------------------------------------------------------------------------
+# MCP credential relay.
+#
+# 1claw-hermes writes Hermes' MCP config once, with a literal
+# `Authorization: Bearer <jwt>` in it. That JWT is the runtime's ~2h agent
+# token, and a bearer baked into a config file cannot be refreshed — so when it
+# expired, every MCP call 401'd, Hermes parked the server after three attempts,
+# and the agent silently lost the entire 1claw toolset while still answering.
+# The user's only remedy was to restart the runtime.
+#
+# Pointing ONECLAW_MCP_URL at a loopback relay *before* that config is written
+# means the baked bearer is replaced on every request with a live one. Hermes'
+# config never changes and never needs to.
+#
+# Kept in a respawn loop: if the relay dies, Hermes loses MCP entirely, which
+# would be worse than the problem being fixed.
+if [ -f /app/mcp-auth-relay.js ]; then
+  ONECLAW_MCP_RELAY_PORT="${ONECLAW_MCP_RELAY_PORT:-8766}"
+  # Capture the real endpoint before overriding the variable Hermes reads.
+  ONECLAW_MCP_UPSTREAM_URL="${ONECLAW_MCP_UPSTREAM_URL:-${ONECLAW_MCP_URL:-https://mcp.1claw.co/mcp}}"
+  export ONECLAW_MCP_RELAY_PORT ONECLAW_MCP_UPSTREAM_URL
+  (
+    while true; do
+      node /app/mcp-auth-relay.js || echo "WARN: mcp-auth-relay exited, restarting" >&2
+      sleep 2
+    done
+  ) &
+  export ONECLAW_MCP_URL="http://127.0.0.1:${ONECLAW_MCP_RELAY_PORT}/mcp"
+  echo "hermes-agent-start: MCP requests relayed via ${ONECLAW_MCP_URL} so the agent JWT stays live" >&2
+else
+  echo "WARN: mcp-auth-relay.js not present — Hermes' MCP bearer will expire with the agent token (restart needed)" >&2
+fi
+
 echo "hermes-agent-start: applying 1claw-hermes runtime integration..." >&2
 
 if command -v 1claw-hermes-runtime-start >/dev/null 2>&1; then

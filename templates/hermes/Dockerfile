@@ -171,6 +171,10 @@ COPY shared/chat-bridge.js /app/chat-bridge.js
 COPY shared/1claw-capabilities-prompt.js /app/1claw-capabilities-prompt.js
 COPY shared/agent-token.js /app/agent-token.js
 COPY shared/native-agent-server.js /app/native-agent-server.js
+# Loopback MCP relay: replaces the bearer Hermes bakes into its MCP config with
+# a live one on every request, so the agent does not lose its whole toolset when
+# the runtime's 2h agent JWT expires. hermes-agent-start.sh starts it.
+COPY shared/mcp-auth-relay.js /app/mcp-auth-relay.js
 COPY shared/image-gen.js /app/image-gen.js
 COPY shared/image-gen-request.js /app/image-gen-request.js
 COPY shared/generated-image-cache.js /app/generated-image-cache.js
@@ -186,7 +190,7 @@ ENV ENABLE_CODE_EXEC=true
 # HERMESPATH-L1: system-only PATH for this root step too.
 RUN PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     chmod +x /app/template-entrypoint.sh /app/user-port.sh /app/hermes-agent-start.sh \
-    && chown appuser:appuser /app/chat-bridge.js /app/1claw-capabilities-prompt.js /app/agent-token.js /app/native-agent-server.js /app/image-gen.js /app/image-gen-request.js /app/generated-image-cache.js /app/message-sanitize.js \
+    && chown appuser:appuser /app/chat-bridge.js /app/1claw-capabilities-prompt.js /app/agent-token.js /app/native-agent-server.js /app/mcp-auth-relay.js /app/image-gen.js /app/image-gen-request.js /app/generated-image-cache.js /app/message-sanitize.js \
        /app/user-port.sh /app/hermes-agent-start.sh /app/hermes-native-setup.js /app/tools/ /app/tools-config.js
 USER appuser
 
