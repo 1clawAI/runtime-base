@@ -78,6 +78,22 @@ function forwardHeaders(incoming) {
 const upstreamUrl = new URL(UPSTREAM);
 const lib = upstreamUrl.protocol === "https:" ? https : http;
 
+/**
+ * The upstream path for an incoming request.
+ *
+ * The relay stands in for exactly one endpoint, and it is *addressed* at the
+ * same path it forwards to — ONECLAW_MCP_URL becomes
+ * `http://127.0.0.1:8766/mcp` and the upstream is `https://mcp.1claw.co/mcp`.
+ * Appending the incoming path to the upstream path, which is the obvious thing
+ * to write, therefore produces `/mcp/mcp` and 404s every call. The incoming
+ * path is ignored; only its query string carries over.
+ */
+function upstreamPathFor(reqUrl) {
+  const q = typeof reqUrl === "string" ? reqUrl.indexOf("?") : -1;
+  const search = q >= 0 ? reqUrl.slice(q) : upstreamUrl.search;
+  return upstreamUrl.pathname + search;
+}
+
 const server = http.createServer((req, res) => {
   // A relay with no credential to attach would forward an unauthenticated
   // request and get an opaque 401 from upstream. Say what actually happened.
@@ -100,12 +116,7 @@ const server = http.createServer((req, res) => {
       protocol: upstreamUrl.protocol,
       hostname: upstreamUrl.hostname,
       port: upstreamUrl.port || (upstreamUrl.protocol === "https:" ? 443 : 80),
-      // The relay is a single endpoint standing in for a single endpoint; a
-      // client that appends a sub-path gets it appended upstream too.
-      path:
-        upstreamUrl.pathname +
-        (req.url && req.url !== "/" ? req.url.replace(/^\/+/, "/") : "") +
-        upstreamUrl.search,
+      path: upstreamPathFor(req.url),
       method: req.method,
       headers: forwardHeaders(req.headers),
       // MCP turns can be long and may stream; this must outlast them rather
@@ -155,4 +166,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { forwardHeaders, DROP_HEADERS };
+module.exports = { forwardHeaders, DROP_HEADERS, upstreamPathFor };

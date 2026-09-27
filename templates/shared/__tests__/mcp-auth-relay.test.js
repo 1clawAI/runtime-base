@@ -104,3 +104,19 @@ test("the Hermes image ships the relay and starts it before writing MCP config",
     "ONECLAW_MCP_URL is never repointed at the relay, so Hermes still talks to the remote endpoint directly",
   );
 });
+
+const { upstreamPathFor } = require("../mcp-auth-relay.js");
+
+test("the upstream path is not doubled", () => {
+  // The relay is addressed at the same path it forwards to: Hermes is pointed
+  // at http://127.0.0.1:8766/mcp and the upstream is https://mcp.1claw.co/mcp.
+  // Appending the incoming path — the obvious thing to write, and what the
+  // first version of this file did — yields /mcp/mcp and 404s every call.
+  assert.equal(upstreamPathFor("/mcp"), "/mcp");
+  assert.equal(upstreamPathFor("/"), "/mcp");
+  assert.equal(upstreamPathFor(undefined), "/mcp");
+});
+
+test("a query string carries over", () => {
+  assert.equal(upstreamPathFor("/mcp?sessionId=abc"), "/mcp?sessionId=abc");
+});
