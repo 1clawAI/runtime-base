@@ -3,6 +3,7 @@
 const http = require("http");
 const https = require("https");
 const { URL } = require("url");
+const { connectionLookupFailure } = require("./connection-lookup.js");
 
 // ---------------------------------------------------------------------------
 // HTTP helpers (Node built-in only)
@@ -56,6 +57,10 @@ function httpRequest(url, method, headers, body) {
 
 let _connectionCache = null;
 let _connectionCacheExpiry = 0;
+// Why the last lookup produced no connection. Callers reported every
+// failure as "no connection found", which sent people to reconnect an
+// account that was already connected.
+let _lastLookupFailure = null;
 
 async function getSlackConnection(context) {
   const now = Date.now();
@@ -68,7 +73,10 @@ async function getSlackConnection(context) {
     const resp = await httpRequest(url, "GET", {
       Authorization: `Bearer ${context.agentToken}`,
     });
-    if (resp.status >= 400) return null;
+    if (resp.status >= 400) {
+      _lastLookupFailure = connectionLookupFailure({ provider: "Slack", status: resp.status });
+      return null;
+    }
 
     const data = JSON.parse(resp.text);
     const connections = data.connections || data || [];
@@ -85,8 +93,10 @@ async function getSlackConnection(context) {
       _connectionCache = slack;
       _connectionCacheExpiry = now + 5 * 60 * 1000;
     }
+    if (!slack) _lastLookupFailure = connectionLookupFailure({ provider: "Slack", absent: true });
     return slack || null;
-  } catch {
+  } catch (e) {
+    _lastLookupFailure = connectionLookupFailure({ provider: "Slack", threw: e.message || String(e) });
     return null;
   }
 }
@@ -165,7 +175,7 @@ const definitions = [
 
 async function executeSendMessage(args, context) {
   const conn = await getSlackConnection(context);
-  if (!conn) return { error: "No Slack OAuth connection found for this agent" };
+  if (!conn) return { error: _lastLookupFailure || connectionLookupFailure({ provider: "Slack", absent: true }) };
 
   const bindingId = getBindingId(conn);
   if (!bindingId) return { error: "Slack connection has no binding ID" };
@@ -205,7 +215,7 @@ async function executeSendMessage(args, context) {
 
 async function executeListChannels(args, context) {
   const conn = await getSlackConnection(context);
-  if (!conn) return { error: "No Slack OAuth connection found for this agent" };
+  if (!conn) return { error: _lastLookupFailure || connectionLookupFailure({ provider: "Slack", absent: true }) };
 
   const bindingId = getBindingId(conn);
   if (!bindingId) return { error: "Slack connection has no binding ID" };
