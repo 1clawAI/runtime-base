@@ -239,3 +239,49 @@ test("the feature names the dashboard requires are actually claimed", () => {
     assert.match(f, /^[a-z0-9_]+$/, `"${f}" is not a stable lowercase identifier`);
   }
 });
+
+/**
+ * Timeline from a real Hermes cold start (runtime 8b82d882, 2026-09-27):
+ *
+ *   11:42:01  container serving
+ *   11:42:04  chat turn arrives; probe fails; answered as the bridge
+ *   11:42:09  `hermes gateway` prints "Starting"
+ *   11:42:33  gateway has loaded its state DB, MCP servers and tool config
+ *
+ * The grace was about five seconds, so it conceded at 11:42:04 and the user
+ * got the wrong agent — while the right one was thirty seconds away. Being
+ * patient is only correct while the container is young, though: a gateway that
+ * has not appeared minutes after boot is not coming, and waiting forty seconds
+ * on every later turn to rediscover that would be its own bug.
+ */
+const { nativeWaitBudgetMs } = require("../native-agent-server.js");
+
+test("a booting container waits long enough for the gateway to appear", () => {
+  const boot = 1_700_000_000_000;
+  // The window that actually mattered: a turn four seconds after boot.
+  const budget = nativeWaitBudgetMs(boot + 4_000, boot);
+  assert.ok(
+    budget >= 30_000,
+    `waits only ${budget}ms four seconds into boot; Hermes needed about thirty seconds`,
+  );
+});
+
+test("patience expires with the startup window", () => {
+  const boot = 1_700_000_000_000;
+  const settled = nativeWaitBudgetMs(boot + 10 * 60_000, boot);
+  assert.ok(
+    settled <= 5_000,
+    `still waiting ${settled}ms ten minutes in — every turn would stall on a gateway that is not coming`,
+  );
+  assert.ok(settled > 0, "a settled container must still probe at least briefly");
+});
+
+test("the budget only ever shrinks with age", () => {
+  const boot = 1_700_000_000_000;
+  let prev = Infinity;
+  for (const min of [0, 1, 2, 3, 5, 30]) {
+    const b = nativeWaitBudgetMs(boot + min * 60_000, boot);
+    assert.ok(b <= prev, `budget grew at ${min}m: ${b} > ${prev}`);
+    prev = b;
+  }
+});

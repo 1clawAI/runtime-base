@@ -297,10 +297,47 @@ const STICKY_NATIVE_FAILURES = new Set(["auth", "not_enabled"]);
  * the happy path, because it only runs where the turn was already going to fall
  * back.
  */
-async function probeNativeWithGrace(config) {
-  if (await probeUrlReachable(config.url, config.token)) return true;
-  await new Promise((r) => setTimeout(r, 750));
-  return probeUrlReachable(config.url, config.token, 3000);
+/** When this process started, used to judge how patient to be below. */
+const PROCESS_STARTED_AT = Date.now();
+
+/**
+ * How long a young container waits for its framework gateway before conceding.
+ *
+ * Measured on a real Hermes cold start: the container was serving at 11:42:01,
+ * `hermes gateway` printed "Starting" at 11:42:09, and it had finished loading
+ * its state DB, MCP servers and tool config at 11:42:33 — about thirty seconds
+ * after the first chat turn arrived. A five-second grace conceded at 11:42:04
+ * and answered as the bridge, which is the wrong agent and the thing the user
+ * notices.
+ *
+ * So be patient while the container is young and stingy afterwards. A gateway
+ * that has not appeared within a couple of minutes of boot is not coming, and
+ * blocking every later turn for half a minute to rediscover that would be its
+ * own bug.
+ */
+const NATIVE_STARTUP_GRACE_WINDOW_MS = 3 * 60_000;
+const NATIVE_WAIT_WHILE_YOUNG_MS = 40_000;
+const NATIVE_WAIT_WHEN_SETTLED_MS = 4_000;
+
+function nativeWaitBudgetMs(now = Date.now(), startedAt = PROCESS_STARTED_AT) {
+  const uptime = now - startedAt;
+  return uptime <= NATIVE_STARTUP_GRACE_WINDOW_MS
+    ? NATIVE_WAIT_WHILE_YOUNG_MS
+    : NATIVE_WAIT_WHEN_SETTLED_MS;
+}
+
+async function probeNativeWithGrace(config, budgetMs = nativeWaitBudgetMs()) {
+  const deadline = Date.now() + budgetMs;
+  let attempt = 0;
+  for (;;) {
+    if (await probeUrlReachable(config.url, config.token, 1500)) return true;
+    if (Date.now() >= deadline) return false;
+    // Back off gently: the gateway usually appears in one or two seconds once
+    // it starts, and polling hard would just add load to a booting container.
+    const wait = Math.min(2000, 500 + attempt * 250);
+    attempt += 1;
+    await new Promise((r) => setTimeout(r, Math.min(wait, deadline - Date.now())));
+  }
 }
 
 /**
@@ -1535,6 +1572,7 @@ if (require.main === module) {
 
 module.exports = {
   RUNTIME_FEATURES,
+  nativeWaitBudgetMs,
   nativeFailureReason,
   toChatCompletionsUrl,
   bridgeChatMode,
