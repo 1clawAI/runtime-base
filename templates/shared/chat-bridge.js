@@ -546,6 +546,20 @@ async function handleChatCompletions(req, res) {
           "X-1Claw-Chat-Mode": "bridge-tools",
         });
         sseHeadersSent = true;
+        // Capability report — see RUNTIME_FEATURES in native-agent-server.js.
+        // A template that runs chat-bridge instead of the native server must
+        // say the same thing, or the dashboard reads its runtimes as stale.
+        try {
+          res.write(
+            `data: ${JSON.stringify({
+              oneclaw_runtime: {
+                features: ["agent_token_renewal", "native_fallback_reporting"],
+              },
+            })}\n\n`
+          );
+        } catch {
+          /* client gone */
+        }
         // Live tool-call visibility: written to the response as each tool
         // starts/finishes, not buffered until the whole loop resolves — this
         // is what turns "blank spinner for N seconds" into watching the

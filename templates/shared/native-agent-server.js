@@ -318,6 +318,42 @@ function nativeFailureReason(status) {
 }
 
 /**
+ * What this container can do, reported once per streamed turn.
+ *
+ * There is no way for the dashboard to tell whether a running runtime is on a
+ * current image: Cloud Run resolves `:latest` to a digest when the revision is
+ * created, so a container keeps whatever it started with until someone
+ * restarts it, and nothing in the row says which build that was. A capability
+ * list solves the only version question anyone actually has — "does this
+ * container have the fix?" — over a channel that already exists, and its
+ * *absence* is just as informative: a container old enough not to send it is a
+ * container old enough to be missing the fix.
+ *
+ * Add a name here when shipping something the dashboard needs to know about.
+ * Never rename one: the dashboard matches on the string.
+ */
+const RUNTIME_FEATURES = [
+  // agent-token.js renews the runtime JWT before it expires, so the agent does
+  // not lose its credential (and with it every 1claw tool) after ~2h.
+  "agent_token_renewal",
+  // The MCP bearer is rewritten per request rather than baked into Hermes'
+  // config at startup.
+  "mcp_auth_relay",
+  // Falling back to the bridge is reported rather than done silently.
+  "native_fallback_reporting",
+];
+
+function writeRuntimeMeta(res) {
+  try {
+    res.write(
+      `data: ${JSON.stringify({ oneclaw_runtime: { features: RUNTIME_FEATURES } })}\n\n`
+    );
+  } catch {
+    /* the client went away */
+  }
+}
+
+/**
  * Announce, on the SSE stream, that this answer came from the bridge after the
  * native gateway declined — the dashboard turns it into a notice with the
  * matching remedy. Written immediately after the headers so it lands before any
@@ -452,6 +488,12 @@ function proxyToNative(config, body, res, wantStream) {
         "X-1Claw-Chat-Mode": "native",
         "X-1Claw-Native-Backend": config.name,
       });
+
+      // Capabilities go out on the native path too. Hermes serves most turns
+      // through here, so reporting only on the bridge path would leave the
+      // dashboard concluding that every working Hermes runtime is on a stale
+      // container.
+      if (wantStream) writeRuntimeMeta(res);
 
       if (!wantStream) {
         // Single JSON body — forward unchanged. The dashboard's non-stream
@@ -1296,6 +1338,7 @@ async function handleChatCompletions(req, res) {
       // turn — "native" is reserved for a proxy to a framework's own gateway.
       "X-1Claw-Chat-Mode": bridgeChatMode(TOOLS_ENABLED),
     });
+    writeRuntimeMeta(res);
     writeFallbackMeta(res, nativeFallback);
     const onEvent = (ev) => res.write(`data: ${JSON.stringify({ tool_call: ev })}\n\n`);
 
@@ -1352,7 +1395,10 @@ async function handleChatCompletions(req, res) {
       // Only onto a stream the client will parse as SSE: a non-2xx passthrough
       // relays the upstream's own JSON body, and an event frame ahead of it
       // would make that unparseable.
-      if ((upstreamResp.statusCode || 0) === 200) writeFallbackMeta(res, nativeFallback);
+      if ((upstreamResp.statusCode || 0) === 200) {
+        writeRuntimeMeta(res);
+        writeFallbackMeta(res, nativeFallback);
+      }
       upstreamResp.pipe(res);
       upstreamResp.on("error", () => res.end());
     } catch (e) {
@@ -1488,6 +1534,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  RUNTIME_FEATURES,
   nativeFailureReason,
   toChatCompletionsUrl,
   bridgeChatMode,

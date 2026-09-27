@@ -187,3 +187,47 @@ test("no key anywhere is empty, not a crash", () => {
   );
   assert.equal(got, "");
 });
+
+/**
+ * The dashboard decides whether a runtime's container is behind by what it
+ * reports on the chat stream — and by the *absence* of a report, since
+ * containers predating this send nothing. So every path that serves a turn has
+ * to report, or a perfectly current runtime reads as stale. Hermes serves most
+ * of its turns through the native proxy, which is the path easiest to forget.
+ */
+const { RUNTIME_FEATURES } = require("../native-agent-server.js");
+
+test("every streaming path reports the container's capabilities", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "native-agent-server.js"), "utf8");
+  // Count call sites only. `function writeRuntimeMeta(res)` contains the call
+  // pattern as a substring, so a naive split counts the declaration and the
+  // test passes with a call site removed — which is how it first behaved.
+  const calls = (src.match(/(?<!function\s)writeRuntimeMeta\(res\)/g) || []).length;
+  assert.ok(
+    calls >= 3,
+    `writeRuntimeMeta is called ${calls} times; the bridge tool loop, the plain ` +
+      `streaming passthrough and the native proxy each need it, or runtimes served ` +
+      `by the missing one look stale to the dashboard`,
+  );
+});
+
+test("chat-bridge reports the same way", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "chat-bridge.js"), "utf8");
+  assert.ok(
+    src.includes("oneclaw_runtime"),
+    "chat-bridge.js never reports capabilities, so templates running it read as stale",
+  );
+  assert.ok(
+    src.includes("agent_token_renewal"),
+    "chat-bridge.js must claim agent_token_renewal — it starts the renewal loop",
+  );
+});
+
+test("the feature names the dashboard requires are actually claimed", () => {
+  // The dashboard's REQUIRED_RUNTIME_FEATURES matches on these exact strings;
+  // a rename on either side silently marks every runtime as behind.
+  assert.ok(RUNTIME_FEATURES.includes("agent_token_renewal"));
+  for (const f of RUNTIME_FEATURES) {
+    assert.match(f, /^[a-z0-9_]+$/, `"${f}" is not a stable lowercase identifier`);
+  }
+});
