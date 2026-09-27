@@ -41,7 +41,7 @@ const OPENAI_KEY_PATHS = [
 
 const BYOK_IMAGE_GEN_HINT =
   "To enable GPT Image generation:\n" +
-  "1. Dashboard → Runtimes → (your runtime) → Config → API Keys — save an OpenAI key at providers/openai/api-key, then Stop and Start the runtime (refreshes the agent token after the first save).\n" +
+  "1. Dashboard → Runtimes → (your runtime) → Config → API Keys — save an OpenAI key at providers/openai/api-key, then Restart the runtime (refreshes the agent token after the first save).\n" +
   "2. Dashboard → Agents → (your agent) → enable Shroud LLM Proxy.\n" +
   "Stripe LLM billing covers chat only — image generation always requires a real OpenAI API key. " +
   "Do not use Runtime → Environment for API keys; that tab blocks *API_KEY* names for security.";
@@ -280,7 +280,7 @@ function formatImageGenFailure(resp, data, upstream, vaultKeyErrors) {
     if (openAiRejected && vaultKeyErrors.length === 0) {
       return (
         `OpenAI rejected the API key (${detail}). ` +
-        "Re-save a valid key at Dashboard → Runtimes → Config → API Keys, then Stop and Start the runtime."
+        "Re-save a valid key at Dashboard → Runtimes → Config → API Keys, then Restart the runtime."
       );
     }
     return `Image generation authentication failed.${vaultHint} ${BYOK_IMAGE_GEN_HINT}`;

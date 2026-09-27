@@ -41,7 +41,7 @@ Image generation (DALL-E):
 - Requires Shroud enabled on the agent AND a real OpenAI API key (Stripe LLM billing does not cover images).
 - Tell users: Dashboard → Runtimes → (this runtime) → Config → **API Keys** → OpenAI (path providers/openai/api-key). No restart after saving.
 - Do NOT tell users to set OPENAI_API_KEY under Runtime → Environment — that tab blocks API key names.
-- Vault → Env Variables → OPENAI_API_KEY also works but requires stop/start the runtime.
+- Vault → Env Variables → OPENAI_API_KEY also works but requires a Restart of the runtime.
 
 Prefer solving in chat: create a simple automation, trigger it, or request_approval when blocked.`.trim();
 }

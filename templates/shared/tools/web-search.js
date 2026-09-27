@@ -224,7 +224,7 @@ async function searchViaPlatformDefault(query, numResults, context) {
   if (!baseUrl || !context.agentToken) {
     return {
       error:
-        "Missing context for the platform default search fallback (need an agent JWT and ONECLAW_BASE_URL / ONECLAW_VAULT_INTERNAL_URL). Stop then Start the runtime.",
+        "Missing context for the platform default search fallback (need an agent JWT and ONECLAW_BASE_URL / ONECLAW_VAULT_INTERNAL_URL). Restart the runtime.",
     };
   }
   const resp = await httpRequest(
@@ -243,7 +243,7 @@ async function searchViaPlatformDefault(query, numResults, context) {
       return {
         error:
           `Web search was refused (${resp.status}): ${message}. ` +
-          "The fallback requires the agent's own JWT. Stop then Start the runtime so Vault injects a fresh token.",
+          "The fallback requires the agent's own JWT. Restart the runtime so Vault injects a fresh token.",
       };
     }
     return { error: message };

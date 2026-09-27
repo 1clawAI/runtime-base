@@ -1078,7 +1078,7 @@ async function agentLoop(messages, model, provider, useOwnKey, maxTokens, onEven
         throw new Error(
           `LLM context too large (${e.message.slice(0, 200)}). ` +
           "Start a new chat conversation — prior inline images in history can inflate the prompt. " +
-          "If this persists on a fresh chat, Stop and Start the runtime to pick up the latest image-gen fix."
+          "If this persists on a fresh chat, Restart the runtime to pick up the latest image-gen fix."
         );
       }
       throw e;
