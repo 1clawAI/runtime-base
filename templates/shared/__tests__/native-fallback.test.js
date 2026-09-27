@@ -285,3 +285,46 @@ test("the budget only ever shrinks with age", () => {
     prev = b;
   }
 });
+
+/**
+ * The dashboard's tools card is a *prediction*: it derives what tools an agent
+ * should have from its template, its config and its env vars. The container
+ * knows what it actually registered, and /health already reports it — but
+ * nothing outside the container can reach /health, so the prediction is all
+ * anyone sees.
+ *
+ * They already disagree. `execute_code` is enabled by default for Hermes and
+ * shown as active, while Hermes refuses it on unattended sessions ("This
+ * session runs on an unattended platform") — so the card claims a capability
+ * that dashboard chat cannot use.
+ *
+ * The capability frame already reaches the panel on every streamed turn. The
+ * tool list rides along with it, so what the UI shows can be what the
+ * container reports rather than what we guessed.
+ */
+test("the capability frame carries the container's real tool list", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "native-agent-server.js"), "utf8");
+  const at = src.indexOf("function writeRuntimeMeta");
+  assert.ok(at > -1, "writeRuntimeMeta is gone");
+  const body = src.slice(at, at + 900);
+  assert.ok(
+    body.includes("tools"),
+    "the frame reports features but not which tools the agent actually has, so " +
+      "the dashboard can only guess",
+  );
+});
+
+test("the tool list is the one the agent was actually given", () => {
+  // Not a hardcoded list: it has to come from the same definitions the agent
+  // is handed, or it is just a second prediction that can drift from the
+  // first.
+  const src = fs.readFileSync(path.join(__dirname, "..", "native-agent-server.js"), "utf8");
+  const at = src.indexOf("function runtimeToolNames");
+  assert.ok(at > -1, "runtimeToolNames is missing");
+  const body = src.slice(at, at + 500);
+  assert.ok(
+    body.includes("ALL_TOOL_DEFINITIONS"),
+    "the reported list must derive from ALL_TOOL_DEFINITIONS, the definitions " +
+      "actually sent to the model",
+  );
+});

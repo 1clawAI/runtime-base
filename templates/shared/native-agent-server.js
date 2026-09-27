@@ -380,10 +380,31 @@ const RUNTIME_FEATURES = [
   "native_fallback_reporting",
 ];
 
+/**
+ * The tools this container actually handed the model.
+ *
+ * Derived from ALL_TOOL_DEFINITIONS rather than a list written out by hand:
+ * anything else is a second prediction that can drift from the first, which
+ * is the problem this exists to fix. The dashboard's tools card infers what
+ * an agent *should* have from its template and config, and the two already
+ * disagree — `execute_code` shows as active while Hermes refuses it on
+ * unattended sessions.
+ */
+function runtimeToolNames() {
+  if (!TOOLS_ENABLED) return [];
+  try {
+    return ALL_TOOL_DEFINITIONS.map((t) => t.function && t.function.name).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function writeRuntimeMeta(res) {
   try {
     res.write(
-      `data: ${JSON.stringify({ oneclaw_runtime: { features: RUNTIME_FEATURES } })}\n\n`
+      `data: ${JSON.stringify({
+        oneclaw_runtime: { features: RUNTIME_FEATURES, tools: runtimeToolNames() },
+      })}\n\n`
     );
   } catch {
     /* the client went away */
