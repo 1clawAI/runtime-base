@@ -43,4 +43,41 @@ function connectionLookupFailure({ provider, status, threw, absent }) {
   );
 }
 
-module.exports = { connectionLookupFailure };
+/**
+ * The same problem for notification channels, in a worse form.
+ *
+ * `fetchChannels` returned `[]` for any 4xx/5xx, `findChannel` found nothing
+ * in it, and the tool reported "No active Telegram channel found. Connect one
+ * via the dashboard." An empty list is a stronger claim than a null: it does
+ * not say "I could not find it", it says "there are none". So an expired token
+ * had the agent assert, confidently, that a channel the user is looking at
+ * does not exist.
+ */
+function channelLookupFailure({ type, status, threw, absent }) {
+  if (absent) {
+    return (
+      `No active ${type} channel is configured for this agent. Connect one in the ` +
+      `dashboard, or pass channel_id to use a specific channel.`
+    );
+  }
+  if (threw) {
+    return (
+      `Could not reach the channels API to find a ${type} channel (${threw}). The ` +
+      `channel may well exist — this is a transport failure, not an empty list. Retry.`
+    );
+  }
+  if (status === 401 || status === 403) {
+    return (
+      `The channels API rejected this agent's credentials (HTTP ${status}), so its ` +
+      `${type} channels could not be listed. This does not mean there are none. The ` +
+      `runtime renews its own token, so retry; if it persists, Restart the runtime.`
+    );
+  }
+  return (
+    `The channels API returned HTTP ${status}, so this agent's ${type} channels ` +
+    `could not be listed. Whether one exists is unknown. Retry, and check the ` +
+    `runtime's logs if it persists.`
+  );
+}
+
+module.exports = { connectionLookupFailure, channelLookupFailure };

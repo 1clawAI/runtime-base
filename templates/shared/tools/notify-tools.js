@@ -4,6 +4,7 @@ const http = require("http");
 const https = require("https");
 const { URL } = require("url");
 const { apiAuthHeaders } = require("../agent-token.js");
+const { channelLookupFailure } = require("./connection-lookup.js");
 const { formatApiError } = require("./api-error.js");
 
 async function httpRequest(url, method, headers, body) {
@@ -38,6 +39,10 @@ function authHeaders(token) {
 let _channelCache = null;
 let _channelCacheTime = 0;
 const CACHE_TTL_MS = 5 * 60 * 1000;
+// Why the last channel listing failed, if it did. Distinguishes
+// "could not list" from "there are none" — the callers used to
+// report both as the latter.
+let _lastChannelFailure = null;
 
 async function fetchChannels(baseUrl, agentId, token) {
   const now = Date.now();
@@ -46,7 +51,13 @@ async function fetchChannels(baseUrl, agentId, token) {
   }
   const url = `${baseUrl}/v1/agents/${agentId}/channels`;
   const resp = await httpRequest(url, "GET", authHeaders(token), null);
-  if (resp.status >= 400) return [];
+  if (resp.status >= 400) {
+    // Returning [] here made every failure indistinguishable from "this agent
+    // has no channels", and the callers say so out loud. Record why instead.
+    _lastChannelFailure = { status: resp.status };
+    return null;
+  }
+  _lastChannelFailure = null;
   const data = JSON.parse(resp.text);
   _channelCache = data.channels || data || [];
   _channelCacheTime = now;
@@ -55,6 +66,9 @@ async function fetchChannels(baseUrl, agentId, token) {
 
 async function findChannel(baseUrl, agentId, token, type, channelId) {
   const channels = await fetchChannels(baseUrl, agentId, token);
+  // null means the list could not be read at all. Falling through would find
+  // nothing in it and report that as "you have no channel".
+  if (channels === null) return null;
   if (channelId) {
     return channels.find((c) => c.id === channelId && c.channel_type === type) || null;
   }
@@ -172,7 +186,9 @@ async function execute(toolName, args, context) {
       const channel = await findChannel(baseUrl, agentId, agentToken, "telegram", channel_id);
       if (!channel) {
         return {
-          error: "No active Telegram channel found.",
+          error: _lastChannelFailure
+            ? channelLookupFailure({ type: "Telegram", ...(_lastChannelFailure) })
+            : channelLookupFailure({ type: "Telegram", absent: true }),
           hint:
             "Channel setup is human-only in the dashboard. Use list_channels to see connected channels, or ask your operator to connect Telegram.",
         };
@@ -193,7 +209,9 @@ async function execute(toolName, args, context) {
       const channel = await findChannel(baseUrl, agentId, agentToken, "discord", channel_id);
       if (!channel) {
         return {
-          error: "No active Discord channel found.",
+          error: _lastChannelFailure
+            ? channelLookupFailure({ type: "Discord", ...(_lastChannelFailure) })
+            : channelLookupFailure({ type: "Discord", absent: true }),
           hint:
             "Channel setup is human-only in the dashboard. Use list_channels to see connected channels, or ask your operator to connect Discord.",
         };
@@ -242,7 +260,9 @@ async function execute(toolName, args, context) {
         );
         if (!platformChannel) {
           return {
-            error: `No active ${deliveryChannel} channel found. Connect one via the dashboard or pass channel_id.`,
+            error: _lastChannelFailure
+              ? channelLookupFailure({ type: deliveryChannel, ...(_lastChannelFailure) })
+              : channelLookupFailure({ type: deliveryChannel, absent: true }),
           };
         }
         steps.push({

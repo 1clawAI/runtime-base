@@ -107,3 +107,51 @@ test("the lookup records why, not just that it failed", () => {
     );
   }
 });
+
+const { channelLookupFailure } = require("../connection-lookup.js");
+
+/**
+ * The notify tools had the same defect in a worse form. `fetchChannels`
+ * returned `[]` for any 4xx/5xx, `findChannel` then found nothing, and the
+ * tool told the user:
+ *
+ *   "No active Telegram channel found. Connect one via the dashboard…"
+ *
+ * An empty list is a stronger claim than a null: it does not say "I could not
+ * find it", it says "there are none". So an expired token made the agent
+ * assert, with confidence, that a channel the user is looking at does not
+ * exist.
+ */
+test("an unreachable channel list is not an empty channel list", () => {
+  const msg = channelLookupFailure({ type: "Telegram", status: 401 });
+  assert.match(msg, /Telegram/);
+  assert.match(msg, /401/);
+  assert.ok(
+    !/connect one/i.test(msg),
+    `must not tell someone to connect a channel that may already exist: ${msg}`,
+  );
+});
+
+test("a server error does not become 'you have no channel'", () => {
+  const msg = channelLookupFailure({ type: "Discord", status: 500 });
+  assert.ok(!/no active/i.test(msg), msg);
+  assert.match(msg, /500/);
+});
+
+test("genuinely absent still says how to add one", () => {
+  const msg = channelLookupFailure({ type: "Telegram", absent: true });
+  assert.match(msg, /connect|channel_id/i);
+});
+
+test("the notify tools no longer collapse errors into an empty list", () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, "..", "notify-tools.js"),
+    "utf8",
+  );
+  assert.ok(
+    !/if \(resp\.status >= 400\) return \[\];/.test(src),
+    "fetchChannels still swallows an HTTP error as an empty channel list, so " +
+      "the agent asserts the user has no channel when the lookup merely failed",
+  );
+  assert.ok(src.includes("channelLookupFailure"), "notify-tools is not wired to it");
+});
