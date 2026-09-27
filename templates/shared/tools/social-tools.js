@@ -3,6 +3,7 @@
 const http = require("http");
 const https = require("https");
 const { URL } = require("url");
+const { connectionLookupFailure } = require("./connection-lookup.js");
 
 // ---------------------------------------------------------------------------
 // HTTP helpers (Node built-in only)
@@ -56,6 +57,9 @@ function httpRequest(url, method, headers, body) {
 
 const _connectionCache = {};
 const _connectionCacheExpiry = {};
+// Why the last connections listing failed, if it did. Returning an empty
+// array for a 4xx made every failure read as "not connected".
+let _lastLookupFailure = null;
 
 async function getOAuthConnections(context) {
   const url = `${context.baseUrl}/v1/agents/${context.agentId}/oauth/connections`;
@@ -63,11 +67,16 @@ async function getOAuthConnections(context) {
     const resp = await httpRequest(url, "GET", {
       Authorization: `Bearer ${context.agentToken}`,
     });
-    if (resp.status >= 400) return [];
+    if (resp.status >= 400) {
+      _lastLookupFailure = { status: resp.status };
+      return null;
+    }
+    _lastLookupFailure = null;
     const data = JSON.parse(resp.text);
     return data.connections || data || [];
-  } catch {
-    return [];
+  } catch (e) {
+    _lastLookupFailure = { threw: e.message || String(e) };
+    return null;
   }
 }
 
@@ -78,6 +87,8 @@ async function getProviderConnection(context, provider) {
   }
 
   const connections = await getOAuthConnections(context);
+  // null means the list could not be read; an empty array means it was
+  // read and holds nothing. Only the second is 'not connected'.
   if (!Array.isArray(connections)) return null;
 
   const match = connections.find(
@@ -170,7 +181,12 @@ async function executePostToX(args, context) {
   const conn = await getProviderConnection(context, "x");
   if (!conn) {
     const twitterConn = await getProviderConnection(context, "twitter");
-    if (!twitterConn) return { error: "No X (Twitter) OAuth connection found for this agent" };
+    if (!twitterConn)
+      return {
+        error: _lastLookupFailure
+          ? connectionLookupFailure({ provider: "X (Twitter)", ...(_lastLookupFailure) })
+          : connectionLookupFailure({ provider: "X (Twitter)", absent: true }),
+      };
     return await doPostToX(args, context, twitterConn);
   }
   return await doPostToX(args, context, conn);
@@ -211,7 +227,12 @@ async function doPostToX(args, context, conn) {
 
 async function executePostToLinkedIn(args, context) {
   const conn = await getProviderConnection(context, "linkedin");
-  if (!conn) return { error: "No LinkedIn OAuth connection found for this agent" };
+  if (!conn)
+      return {
+        error: _lastLookupFailure
+          ? connectionLookupFailure({ provider: "LinkedIn", ...(_lastLookupFailure) })
+          : connectionLookupFailure({ provider: "LinkedIn", absent: true }),
+      };
 
   const bindingId = getBindingId(conn);
   if (!bindingId) return { error: "LinkedIn connection has no binding ID" };

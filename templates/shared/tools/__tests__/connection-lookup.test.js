@@ -155,3 +155,29 @@ test("the notify tools no longer collapse errors into an empty list", () => {
   );
   assert.ok(src.includes("channelLookupFailure"), "notify-tools is not wired to it");
 });
+
+/**
+ * social-tools is the fourth copy. `getOAuthConnections` returned `[]` on any
+ * 4xx/5xx or throw, so the X and LinkedIn tools told the user they had no
+ * connection whenever the lookup merely failed.
+ */
+test("the social tools do not collapse a failed lookup into 'not connected'", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "social-tools.js"), "utf8");
+  assert.ok(
+    !/No (X \(Twitter\)|LinkedIn) OAuth connection found for this agent/.test(src),
+    "an auth failure or a server error still reads as 'you have not connected " +
+      "this account', which sends people to reconnect something that works",
+  );
+  assert.ok(
+    src.includes("connectionLookupFailure"),
+    "social-tools.js is not wired to the failure describer",
+  );
+});
+
+test("its lookup reports why it came back empty", () => {
+  const src = fs.readFileSync(path.join(__dirname, "..", "social-tools.js"), "utf8");
+  assert.ok(
+    !/if \(resp\.status >= 400\) return \[\];/.test(src),
+    "getOAuthConnections still swallows an HTTP error as an empty list",
+  );
+});
