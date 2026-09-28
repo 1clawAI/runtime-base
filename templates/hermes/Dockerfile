@@ -175,6 +175,13 @@ COPY shared/native-agent-server.js /app/native-agent-server.js
 # a live one on every request, so the agent does not lose its whole toolset when
 # the runtime's 2h agent JWT expires. hermes-agent-start.sh starts it.
 COPY shared/mcp-auth-relay.js /app/mcp-auth-relay.js
+# Anthropic Workload Identity Federation: mints a short-lived
+# `sk-ant-oat01-...` from the runtime's own identity and attaches it per
+# request, so no Anthropic key is stored and Hermes does not have to re-read
+# one that expires. Started by hermes-agent-start.sh when the vault sets
+# ONECLAW_ANTHROPIC_OIDC=1.
+COPY shared/anthropic-oidc.js /app/anthropic-oidc.js
+COPY shared/anthropic-relay.js /app/anthropic-relay.js
 COPY shared/image-gen.js /app/image-gen.js
 COPY shared/image-gen-request.js /app/image-gen-request.js
 COPY shared/generated-image-cache.js /app/generated-image-cache.js

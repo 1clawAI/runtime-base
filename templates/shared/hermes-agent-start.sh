@@ -51,6 +51,38 @@ else
   echo "WARN: mcp-auth-relay.js not present — Hermes' MCP bearer will expire with the agent token (restart needed)" >&2
 fi
 
+# Anthropic without a stored key.
+#
+# When the agent has OIDC federation enabled for Anthropic, the vault sets
+# ONECLAW_ANTHROPIC_OIDC=1 and this starts a loopback relay that mints an
+# `sk-ant-oat01-...` from the runtime's own identity and attaches it per
+# request. Hermes reads ANTHROPIC_API_KEY once at start and a federated token
+# is short-lived by design, so injecting one at boot would be wrong within the
+# hour — same reason the MCP relay above exists.
+#
+# Not started when Shroud is routing: there the sidecar holds the provider
+# credential and LLM traffic already goes through 127.0.0.1:8082, so a second
+# credential path would be two answers to one question.
+if [ "${ONECLAW_ANTHROPIC_OIDC:-}" = "1" ] && [ "${ONECLAW_SHROUD_ENABLED:-}" != "1" ]; then
+  if [ -f /app/anthropic-relay.js ]; then
+    ONECLAW_ANTHROPIC_RELAY_PORT="${ONECLAW_ANTHROPIC_RELAY_PORT:-8767}"
+    export ONECLAW_ANTHROPIC_RELAY_PORT
+    (
+      while true; do
+        node /app/anthropic-relay.js || echo "WARN: anthropic-relay exited, restarting" >&2
+        sleep 2
+      done
+    ) &
+    export ANTHROPIC_BASE_URL="http://127.0.0.1:${ONECLAW_ANTHROPIC_RELAY_PORT}"
+    # Hermes requires the variable to be set; the relay replaces it per
+    # request, so the value is a placeholder and never a credential.
+    export ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-oidc-federated}"
+    echo "hermes-agent-start: Anthropic via OIDC federation — no stored key (${ANTHROPIC_BASE_URL})" >&2
+  else
+    echo "WARN: ONECLAW_ANTHROPIC_OIDC=1 but anthropic-relay.js is not present — rebuild the runtime to pick it up" >&2
+  fi
+fi
+
 echo "hermes-agent-start: applying 1claw-hermes runtime integration..." >&2
 
 if command -v 1claw-hermes-runtime-start >/dev/null 2>&1; then
