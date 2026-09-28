@@ -177,6 +177,8 @@ function isExpiredSignatureError(status, bodyText) {
 }
 
 module.exports = {
+  // Exported for anthropic-oidc.js, which calls the same vault.
+  vaultBaseUrl,
   acceptRefreshedAgentToken,
   apiAuthHeaders,
   getAgentToken,
