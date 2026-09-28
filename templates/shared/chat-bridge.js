@@ -213,10 +213,32 @@ function systemPrompt(opts = {}) {
   const effectiveProvider = provider || DEFAULT_PROVIDER;
   const modelLine = `You are currently running on ${effectiveModel} via ${effectiveProvider}.`;
 
+  // These lines used to say: "When the user shares preferences, goals, or
+  // asks you to remember something, confirm that it is stored in durable
+  // memory." No instruction to *store* anything — just to say it was stored.
+  //
+  // So the model did exactly that. Asked to remember a long growth plan, it
+  // replied "Saved. I'll remember 1Claw, the 1M user goal, and the full
+  // growth strategy across all future sessions", called nothing, and could
+  // not answer "what is your goal" a minute later. The `remember` tool was
+  // in the tool list the whole time; it was never asked to use it, and it
+  // was explicitly told to confirm regardless.
+  //
+  // A confirmation the model is instructed to produce is not evidence of
+  // anything. The rule now is the opposite: call the tool, and only say what
+  // the tool returned.
+  // `getAvailableTools` returns `modules` as a Map keyed by tool name, not
+  // an array — an earlier draft called `.some()` on it, which throws.
+  const rememberToolAvailable =
+    typeof toolModules?.has === "function" && toolModules.has("remember");
   const memoryLines = memoryEnabled
     ? [
-        "You have persistent memory via 1Claw's agent memory system — facts and goals you store survive across chat sessions and browser restarts.",
-        "When the user shares preferences, goals, or asks you to remember something, confirm that it is stored in durable memory.",
+        "You have persistent memory via 1Claw's agent memory system — facts and goals stored there survive across chat sessions, restarts and rebuilds.",
+        rememberToolAvailable
+          ? "To remember something you MUST call the `remember` tool. Saying you will remember, without calling it, stores nothing."
+          : "The `remember` tool is not loaded in this session, so you cannot store anything right now — say so plainly if asked to remember something.",
+        "Never tell the user something has been saved unless a tool call returned success. If a save fails, say it failed and why.",
+        "When the user says \"remember it\" or \"save that\", the thing to store is what was just discussed — write it out in full in the tool call, not the pronoun.",
         "Do NOT claim you lack persistent memory. You can recall stored context below and persist new facts from this conversation.",
       ]
     : [

@@ -1225,7 +1225,13 @@ function buildSystemPrompt(opts = {}) {
     runtimeName ? `Runtime: ${runtimeName}.` : null,
     AGENT_ID ? `Agent ID: ${AGENT_ID}.` : null,
     "You have NATIVE access to 1Claw tools — you can read/write vault secrets, list signing keys (ETH/XRP addresses), use agent memory, create simple automations, trigger workflows, and more.",
+    // This path already said "store it" rather than "confirm it is stored",
+    // which is why the bug was only ever seen through the chat bridge. The
+    // second line is the guarantee the bridge was missing: a save is only
+    // real if a tool said so.
     "When the user asks you to remember something, store it in durable memory using put_memory or remember.",
+    "Never tell the user something has been saved unless the tool call returned success — if it failed, say so.",
+    "When the user says \"remember it\" or \"save that\", store what was just discussed, written out in full — not the pronoun.",
     "When you need credentials or secrets, use get_secret instead of asking the user to paste them.",
     "When the user asks for wallet addresses or signing keys, use list_signing_keys — not list_secrets or agent_keys/ paths.",
     build1ClawCapabilitiesPrompt(),
