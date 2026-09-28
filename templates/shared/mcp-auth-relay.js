@@ -34,9 +34,63 @@ const { URL } = require("url");
 
 const { getAgentToken, startAgentTokenRenewal } = require("./agent-token.js");
 
-const UPSTREAM = (
-  process.env.ONECLAW_MCP_UPSTREAM_URL || "https://mcp.1claw.co/mcp"
-).replace(/\/+$/, "");
+/**
+ * The only hosts this relay will send a credential to.
+ *
+ * MCPRELAY-M1: the upstream came straight from `ONECLAW_MCP_UPSTREAM_URL`
+ * with no check, and neither that key nor `ONECLAW_MCP_URL` was in the
+ * vault's platform-controlled list — so an org member who can edit env vars
+ * could point the relay at their own server and collect fresh agent tokens
+ * for as long as the runtime stayed up, because this relay renews them.
+ *
+ * Both keys are now platform-controlled, but that governs `env_public`
+ * alone. A relay whose whole job is attaching a live credential should not
+ * be willing to send it to an arbitrary host whatever its environment says,
+ * so the host is pinned here too. Exact match, not a suffix: `suffix`
+ * matching accepts `mcp.1claw.co.evil.example`.
+ *
+ * Both brand domains, because the platform serves both.
+ */
+const ALLOWED_UPSTREAM_HOSTS = ["mcp.1claw.co", "mcp.1claw.xyz"];
+
+const DEFAULT_UPSTREAM = "https://mcp.1claw.co/mcp";
+
+/**
+ * Resolve and validate the upstream. Throws rather than falling back: a relay
+ * that quietly used the default after being pointed somewhere else would hide
+ * a misconfiguration, and one that quietly used the override would be the bug
+ * this exists to prevent.
+ */
+function resolveUpstream(configured) {
+  const raw = (configured || DEFAULT_UPSTREAM).trim();
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error(`ONECLAW_MCP_UPSTREAM_URL is not a URL: ${raw}`);
+  }
+  if (url.protocol !== "https:") {
+    throw new Error(
+      `ONECLAW_MCP_UPSTREAM_URL must be https — the agent token is the payload, ` +
+        `and ${url.protocol}// would send it in clear`,
+    );
+  }
+  // `new URL("https://mcp.1claw.co@evil.example/")` has hostname
+  // evil.example, so reading hostname is what defeats the userinfo trick —
+  // but a credential in the URL has no business here either way.
+  if (url.username || url.password) {
+    throw new Error(`ONECLAW_MCP_UPSTREAM_URL must not carry credentials: ${raw}`);
+  }
+  if (!ALLOWED_UPSTREAM_HOSTS.includes(url.hostname)) {
+    throw new Error(
+      `${url.hostname} is not an allowed MCP upstream — refused. ` +
+        `Allowed: ${ALLOWED_UPSTREAM_HOSTS.join(", ")}`,
+    );
+  }
+  return `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+}
+
+const UPSTREAM = resolveUpstream(process.env.ONECLAW_MCP_UPSTREAM_URL);
 const PORT = parseInt(process.env.ONECLAW_MCP_RELAY_PORT || "8766", 10);
 const VAULT_ID = process.env.ONECLAW_VAULT_ID || "";
 
@@ -166,4 +220,10 @@ if (require.main === module) {
   });
 }
 
-module.exports = { forwardHeaders, DROP_HEADERS, upstreamPathFor };
+module.exports = {
+  forwardHeaders,
+  DROP_HEADERS,
+  upstreamPathFor,
+  resolveUpstream,
+  ALLOWED_UPSTREAM_HOSTS,
+};
