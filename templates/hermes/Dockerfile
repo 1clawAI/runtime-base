@@ -26,13 +26,32 @@ COPY shared/fix-esm-imports.mjs /tmp/fix-esm-imports.mjs
 
 # 1claw-hermes integration package (github.com/1clawAI/1claw-hermes)
 # Base image sets NODE_ENV=production; --include=dev installs typescript + @types/node for tsc.
+#
+# `--omit=optional` keeps this image on the sidecar binary it compiled itself.
+#
+# Hermes lists `@1claw/shroud-sidecar-{linux-x64,darwin-arm64}` under
+# optionalDependencies, and `resolveSidecarBinary()` prefers that package over
+# anything on PATH. That order is right on a laptop, where the package is the
+# pinned, integrity-checked copy and PATH holds whatever happens to be there.
+# It is wrong here: the base image builds the sidecar from the pinned
+# `1claw-shroud-sidecar` submodule commit and installs it at
+# /usr/local/bin/shroud-sidecar (runtime-base/Dockerfile), and that binary is
+# the one this image was built and tested against. Resolving the registry copy
+# instead would put a second, independently versioned sidecar inside a tested
+# image, and it would change which binary runs the moment those packages are
+# published rather than when anything here changed.
+#
+# So: the registry packages serve Hermes installs outside the image, and the
+# image serves itself. The `test -x /usr/local/bin/shroud-sidecar` above is
+# what makes that safe — omitting the optional dependency cannot leave the
+# binary missing, because the build already failed if it were.
 RUN echo "Installing 1claw-hermes@${ONECLAW_HERMES_REF}" && \
     mkdir -p /opt/1claw-hermes && cd /opt/1claw-hermes && git init -q && \
     git remote add origin https://github.com/1clawAI/1claw-hermes.git && \
     git fetch -q --depth 1 origin "${ONECLAW_HERMES_REF}" && \
     git checkout -q FETCH_HEAD && \
-    npm install --include=dev && npm run build && \
-    npm install -g /opt/1claw-hermes && \
+    npm install --include=dev --omit=optional && npm run build && \
+    npm install -g /opt/1claw-hermes --omit=optional && \
     node /tmp/fix-esm-imports.mjs \
       /opt/1claw-hermes/node_modules/@1claw/sdk \
       "$(npm root -g)/@workspace/1claw-hermes/node_modules/@1claw/sdk" && \
