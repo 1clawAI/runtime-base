@@ -1,6 +1,16 @@
 # Build context must be packages/ (parent of runtime-base and 1claw-shroud-sidecar):
 #   docker build -f runtime-base/Dockerfile -t runtime-base:latest .
-FROM --platform=linux/amd64 golang:1.24-bookworm AS sidecar-builder
+# Base images are pinned by digest, not by tag.
+#
+# `node:22-slim` and friends are moving tags: the same line can resolve to
+# different userland in two builds a week apart, which makes a build
+# unreproducible and means an upstream compromise arrives without any change
+# here. The tag is kept beside the digest for readability; the digest is what
+# docker actually resolves.
+#
+# renovate.json keeps these current -- a pin nobody updates is its own problem,
+# because it freezes known-bad versions in place.
+FROM --platform=linux/amd64 golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS sidecar-builder
 WORKDIR /src
 COPY 1claw-shroud-sidecar/go.mod 1claw-shroud-sidecar/go.sum ./
 RUN go mod download
@@ -8,7 +18,7 @@ COPY 1claw-shroud-sidecar/ ./
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /shroud-sidecar .
 
 # Node 24 LTS: openclaw requires >=24.16 (22 is maintenance-only from 2026-10).
-FROM --platform=linux/amd64 node:24-slim AS base
+FROM --platform=linux/amd64 node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \

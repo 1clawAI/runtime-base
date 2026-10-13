@@ -56,8 +56,52 @@ if [ -n "${BINARY_URL:-}" ]; then
     echo "WARN: BINARY_SHA256 not set — the fetched binary is not pinned"
   fi
   # A tarball or zip: unpack, then the command decides what to run.
+  #
+  # The tar branch checks the member list before extracting anything (tar-slip,
+  # CWE-22). GNU tar -- which is what the Debian base image provides -- happily
+  # extracts a member named `../../etc/cron.d/x`, walking out of `-C` and
+  # writing wherever the process can reach. It strips a leading `/` with only a
+  # warning. So an attacker who controls `BINARY_URL`, or anyone who can
+  # man-in-the-middle it when `BINARY_SHA256` is unset (see the WARN above),
+  # gets arbitrary file write inside the tenant's runtime container.
+  #
+  # Checked rather than flagged: `--no-absolute-filenames` exists in GNU tar but
+  # not in BusyBox tar, and nothing here guarantees which one is present. A
+  # pre-flight listing is portable and it fails loudly, naming the member, which
+  # a silently-skipped file would not.
+  #
+  # The zip branch needs no equivalent. Python's `ZipFile.extractall`
+  # sanitizes member names itself: verified 2026-10-12 against an archive
+  # containing both `../../escaped.txt` and `/absolute-escape.txt`, both of
+  # which landed inside the target directory with their traversal stripped.
+  # Adding a hand-rolled loop there would be a second implementation of
+  # something the standard library already does correctly.
+  reject_unsafe_tar_members() {
+    archive="$1"
+    # `tar -tzf` lists member names one per line. An empty listing is also a
+    # failure: a corrupt or empty archive should not extract silently.
+    members="$(tar -tzf "$archive")" || {
+      echo "Could not read the archive member list; refusing to extract"
+      exit 78
+    }
+    if [ -z "$members" ]; then
+      echo "Archive contains no members; refusing to extract"
+      exit 78
+    fi
+    # Absolute paths, parent traversal at any position, and `~` expansion.
+    offending="$(printf '%s\n' "$members" | grep -E '^/|^~|(^|/)\.\.(/|$)' || true)"
+    if [ -n "$offending" ]; then
+      echo "Refusing to extract: archive member escapes the target directory"
+      printf '  %s\n' "$offending"
+      exit 78
+    fi
+  }
   case "$BINARY_URL" in
-    *.tar.gz|*.tgz) mkdir -p /app/workspace/bin/unpacked && tar -xzf /app/workspace/bin/app -C /app/workspace/bin/unpacked && echo "Unpacked to /app/workspace/bin/unpacked" ;;
+    *.tar.gz|*.tgz)
+      mkdir -p /app/workspace/bin/unpacked \
+        && reject_unsafe_tar_members /app/workspace/bin/app \
+        && tar -xzf /app/workspace/bin/app -C /app/workspace/bin/unpacked --no-same-owner \
+        && echo "Unpacked to /app/workspace/bin/unpacked" ;;
     *.zip) mkdir -p /app/workspace/bin/unpacked && python3 -c "import zipfile;zipfile.ZipFile('/app/workspace/bin/app').extractall('/app/workspace/bin/unpacked')" && echo "Unpacked to /app/workspace/bin/unpacked" ;;
     *) chmod +x /app/workspace/bin/app ;;
   esac
